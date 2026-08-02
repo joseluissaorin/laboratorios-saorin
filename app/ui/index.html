@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>film-look lab — LUT + film emulation</title>
+<style>
+  :root { --bg:#141210; --panel:#1e1b17; --fg:#e8ddc9; --accent:#c97b4a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 -apple-system, "SF Pro", sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; gap:14px; align-items:center; padding:8px 14px; background:var(--panel); border-bottom:1px solid #000; }
+  header b { color:var(--accent); font-weight:600; }
+  header .sp { flex:1; }
+  button { background:#2c2721; color:var(--fg); border:1px solid #4a4136; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  main { flex:1; display:flex; min-height:0; }
+  #stage { flex:1; position:relative; display:flex; align-items:center; justify-content:center; background:#000; min-width:0; }
+  canvas { max-width:100%; max-height:100%; }
+  #refimg { position:absolute; inset:0; margin:auto; max-width:100%; max-height:100%; display:none; }
+  #refimg.on { display:block; }
+  #debug { position:absolute; left:8px; top:8px; margin:0; font:10px/1.35 ui-monospace,monospace; color:#7fd4a0; text-shadow:0 1px 2px #000; pointer-events:none; white-space:pre-wrap; max-width:60%; }
+  #controls { width:330px; overflow-y:auto; background:var(--panel); padding:10px 14px 40px; border-left:1px solid #000; }
+  #controls h3 { margin:14px 0 4px; font-size:11px; letter-spacing:.12em; color:var(--accent); }
+  .row { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; align-items:center; }
+  .slider { display:flex; align-items:center; gap:8px; margin:2px 0; }
+  .slider span { width:86px; color:#b9ac93; }
+  .slider input[type=range] { flex:1; accent-color:var(--accent); }
+  .slider em { width:40px; text-align:right; font-style:normal; color:#8f8471; font-variant-numeric:tabular-nums; }
+  .chk { display:flex; gap:6px; align-items:center; color:#b9ac93; }
+  .chk input { accent-color:var(--accent); }
+  .wipe input { width:110px; accent-color:var(--accent); }
+  .note { color:#8f8471; font-size:11px; margin-top:18px; }
+  #status { color:#8f8471; font-size:11px; }
+  #transport { display:flex; gap:10px; align-items:center; padding:6px 14px; background:var(--panel); border-top:1px solid #000; }
+  #seek { flex:1; accent-color:var(--accent); }
+  #tcode, #fps { font-variant-numeric:tabular-nums; color:#8f8471; width:56px; }
+  #rmodal { position:fixed; inset:0; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:10; }
+  #rmodal.on { display:flex; }
+  #rbox { width:460px; background:var(--panel); border:1px solid #4a4136; border-radius:10px; padding:18px 20px; }
+  #rbox h2 { margin:0 0 12px; font-size:14px; color:var(--accent); }
+  #rbox .rrow { display:flex; gap:8px; align-items:center; margin:8px 0; }
+  #rbox .rrow span { width:70px; color:#b9ac93; }
+  #rbox select { background:#2c2721; color:var(--fg); border:1px solid #4a4136; border-radius:6px; padding:4px 8px; }
+  #rbar { height:8px; background:#2c2721; border-radius:4px; overflow:hidden; margin:12px 0 6px; }
+  #rfill { height:100%; width:0%; background:var(--accent); transition:width .2s; }
+  #rinfo { font-size:11px; color:#8f8471; min-height:14px; }
+  #rbox .rend { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <b>film-look lab</b>
+  <span id="status">cargando…</span>
+  <span class="sp"></span>
+  <button id="ref">referencia</button>
+</header>
+<main>
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <img id="refimg" src="assets/ref_graded.png" alt="">
+    <pre id="debug"></pre>
+  </div>
+  <div id="controls"></div>
+</main>
+<div id="transport">
+  <button id="play">⏯</button>
+  <input type="range" id="seek" min="0" max="1" step="0.001" value="0">
+  <span id="tcode">0.00s</span>
+  <button id="renderBtn">render…</button>
+  <span id="fps"></span>
+</div>
+<div id="rmodal">
+  <div id="rbox">
+    <h2>Render</h2>
+    <div class="rrow"><span>destino</span><button id="rOut">elegir…</button><em id="rOutName" style="font-style:normal;color:#8f8471;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></em></div>
+    <div class="rrow"><span>codec</span><select id="rCodec">
+      <option value="prores_ks">ProRes 4444 (.mov, máster)</option>
+      <option value="hevc_videotoolbox">HEVC 10-bit (.mp4, entrega)</option>
+    </select></div>
+    <div class="rrow"><span>fps</span><select id="rFps">
+      <option value="0">nativo del clip</option>
+      <option value="24">24</option><option value="25">25</option>
+      <option value="30">30</option><option value="48">48</option><option value="60">60</option>
+    </select></div>
+    <div id="rbar"><div id="rfill"></div></div>
+    <div id="rinfo"></div>
+    <div class="rend">
+      <button id="rCancel" disabled>cancelar</button>
+      <button id="rStart">renderizar</button>
+    </div>
+  </div>
+</div>
+<script type="module" src="js/ui.js"></script>
+</body>
+</html>

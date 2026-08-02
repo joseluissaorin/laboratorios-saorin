@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Laboratorios Saorín</title>
+<link rel="stylesheet" href="css/lab.css">
+</head>
+<body class="room-mesa">
+
+<div id="app">
+
+  <!-- ══ rótulo del taller: lo único que grita ══ -->
+  <header id="rotulo">
+    <div class="masthead">
+      <span class="shout" data-ink="LABORATORIOS">LABORATORIOS</span>
+      <span class="shout tinta" data-ink="SAORÍN">SAORÍN</span>
+    </div>
+    <nav id="puertas">
+      <button data-room="mesa" class="puerta active"><i>·</i> la mesa</button>
+      <button data-room="dark" class="puerta"><i>·</i> el cuarto oscuro</button>
+      <button data-room="rev" class="puerta"><i>·</i> el revelado</button>
+    </nav>
+    <div class="top-right">
+      <button id="btn-mute" class="markbtn" title="el sonido del taller">
+        <svg class="mark"><use href="#mk-bell"/></svg>
+      </button>
+      <button id="btn-ajustes" class="markbtn" title="ajustes del taller">⚙</button>
+      <select id="proj-sel" title="la bobina abierta (proyectos)"></select>
+      <span id="save-state" title="la bobina se guarda sola">●</span>
+    </div>
+  </header>
+
+  <!-- ══ SALA 1 · LA MESA DE MONTAJE (papel, luz de día) ══ -->
+  <main id="room-mesa" class="room">
+    <div class="mesa-cols">
+
+      <aside id="estanteria">
+        <div class="susurro-titulo">estantería de material</div>
+        <button id="btn-importar" class="importar" title="trae cintas de cualquier carpeta (se referencian, no se copian)">
+          <span class="imp-mas">+</span> trae material
+        </button>
+        <div id="latas"></div>
+        <div class="nota-mano">un toque: al proyector ·<br>dos toques: a la bobina</div>
+        <div class="barcode mini"><span>BOBINA·01</span></div>
+        <img id="foto-lab" src="assets/matter/lab_photo.jpg" alt="" title="control de calidad de película, años 30 · Library of Congress (dominio público)">
+      </aside>
+
+      <section id="moviola">
+        <div class="moviola-marco">
+          <canvas id="viewer"></canvas>
+          <div id="viewer-overlay" class="hidden">enhebrando…</div>
+          <div class="esquinas"><i></i><i></i><i></i><i></i></div>
+          <!-- la cinta en el proyector, sin pasar por la bobina -->
+          <div id="fuente-bar" class="hidden">
+            <span class="f-chip">FUENTE</span>
+            <span class="f-nombre"></span>
+            <span class="f-marcas"></span>
+            <span class="spacer"></span>
+            <button id="f-in" class="fbtn" title="marcar entrada [I]">⌐ entrada</button>
+            <button id="f-out" class="fbtn" title="marcar salida [O]">salida ¬</button>
+            <button id="f-add" class="fbtn fuerte" title="el tramo a la bobina [⏎]">a la bobina</button>
+            <button id="f-close" class="fbtn" title="cerrar [esc]">×</button>
+          </div>
+        </div>
+        <div id="mando-moviola">
+          <span id="tc" class="contador">00:00:00:00</span>
+          <div class="transporte">
+            <button id="btn-start" class="markbtn" title="rebobinar del todo"><svg class="mark"><use href="#mk-home"/></svg></button>
+            <button id="btn-back" class="markbtn" title="un fotograma atrás [←]"><svg class="mark"><use href="#mk-step-l"/></svg></button>
+            <button id="btn-play" class="markbtn big" title="proyectar [espacio]"><svg class="mark" id="playmark"><use href="#mk-play"/></svg></button>
+            <button id="btn-fwd" class="markbtn" title="un fotograma adelante [→]"><svg class="mark"><use href="#mk-step-r"/></svg></button>
+            <button id="btn-end" class="markbtn" title="a la cola"><svg class="mark"><use href="#mk-end"/></svg></button>
+          </div>
+          <div id="manivela" title="la manivela — arrastra para repasar la película">
+            <svg viewBox="0 0 60 60" id="manivela-svg">
+              <circle cx="30" cy="30" r="24" fill="none" stroke-width="3.4"/>
+              <circle cx="30" cy="30" r="4.5" fill="currentColor" stroke="none"/>
+              <g id="manivela-brazo">
+                <path d="M30 30 C36 26.5 42.5 21.5 46 17" fill="none" stroke-width="3.6"/>
+                <circle cx="46.5" cy="16" r="4.8" fill="currentColor" stroke="none"/>
+              </g>
+            </svg>
+          </div>
+          <button id="btn-nativa" class="fbtn" title="la ampliadora NATIVA: ventana propia a resolución completa (sin techo de WebGL)">◱ nativa</button>
+          <span id="viewer-fps" class="susurro"></span>
+        </div>
+      </section>
+
+      <aside id="saco-wrap">
+        <div class="susurro-titulo">recortes <span class="mano">(por si acaso)</span></div>
+        <div id="saco"></div>
+      </aside>
+    </div>
+
+    <!-- la tira de película sobre la mesa -->
+    <section id="banco">
+      <div id="banco-cabecera">
+        <span class="susurro">la bobina · <span id="banco-total">00:00</span></span>
+        <select id="proj-aspect" title="relación de aspecto del proyecto">
+          <option value="auto">aspecto: auto</option>
+          <option value="16:9">16:9 · yt</option>
+          <option value="9:16">9:16 · reels</option>
+          <option value="1:1">1:1</option>
+          <option value="4:5">4:5</option>
+          <option value="2.39">2.39 · cine</option>
+        </select>
+        <span id="proj-info" class="susurro"></span>
+        <span class="spacer"></span>
+        <span id="pista-hint" class="susurro">empalmadora: marca con <b>B</b>, corta con <b>B</b> otra vez</span>
+        <!-- el inspector de sonido del clip seleccionado -->
+        <span id="insp" class="hidden">
+          <span id="insp-nombre" class="susurro-titulo"></span>
+          <span class="susurro-titulo">ganancia</span>
+          <input type="range" id="i-gain" min="-24" max="12" step="0.5" value="0" title="ganancia del clip (dB)">
+          <span id="i-gain-v" class="susurro">0 dB</span>
+          <label class="susurro" title="silenciar el clip"><input type="checkbox" id="i-mute"> mudo</label>
+          <span class="susurro-titulo">entra</span>
+          <input type="number" id="i-fin" min="0" max="30" step="0.1" value="0" title="fundido de entrada (s)">
+          <span class="susurro-titulo">sale</span>
+          <input type="number" id="i-fout" min="0" max="30" step="0.1" value="0" title="fundido de salida (s)">
+          <span id="insp-tf" class="hidden">
+            <span class="susurro-titulo">· encuadre</span>
+            <input type="range" id="t-scale" min="0.5" max="3" step="0.01" value="1" title="escala (punch-in)">
+            <span id="t-scale-v" class="susurro">100%</span>
+            <input type="number" id="t-rot" min="-180" max="180" step="0.5" value="0" title="giro (grados)">
+            <input type="number" id="t-x" min="-0.5" max="0.5" step="0.01" value="0" title="posición horizontal (fracción)">
+            <input type="number" id="t-y" min="-0.5" max="0.5" step="0.01" value="0" title="posición vertical (fracción)">
+            <label class="susurro" title="rellenar el cuadro (recorta) en vez de encajar (letterbox)">
+              <input type="checkbox" id="t-fill"> llenar</label>
+            <span class="susurro-titulo">vel</span>
+            <input type="number" id="t-speed" min="0.25" max="4" step="0.05" value="1" title="velocidad del clip (×)">
+          </span>
+        </span>
+        <span class="spacer"></span>
+        <span class="susurro-titulo">lupa</span>
+        <input type="range" id="tl-zoom" min="4" max="140" value="18">
+      </div>
+      <canvas id="timeline"></canvas>
+    </section>
+  </main>
+
+  <!-- ══ SALA 2 · EL CUARTO OSCURO (luz de seguridad) ══ -->
+  <main id="room-dark" class="room">
+    <div class="dark-cols">
+      <aside id="quimicos">
+        <div class="susurro-titulo safelight">los baños</div>
+        <div id="botellas"></div>
+        <div class="susurro-titulo safelight" style="margin-top:14px">los stocks</div>
+        <div id="stock-row"></div>
+        <div class="nota-mano safelight-nota">no abrir la puerta<br>con papel dentro</div>
+      </aside>
+
+      <section id="ampliadora">
+        <div id="gel-slots">
+          <div class="gel-slot" id="slot-entrada" title="gelatina de entrada: de log a 709">
+            <span class="gel-label">entrada</span>
+            <div class="gel" id="gel-entrada"><span></span></div>
+          </div>
+          <div class="gel-slot" id="slot-color" title="gelatina de color: el grade">
+            <span class="gel-label">color</span>
+            <div class="gel" id="gel-color"><span></span></div>
+          </div>
+          <button id="abre-cajon" class="cajon-btn">el cajón de gelatinas</button>
+        </div>
+        <div class="ampliadora-marco">
+          <!-- el canvas del visor se muda aquí al entrar -->
+          <div id="ampliadora-hueco"></div>
+        </div>
+        <div id="mando-dark">
+          <span id="tc-dark" class="contador safelight">00:00:00:00</span>
+          <button id="btn-play-dark" class="markbtn big safelight" title="proyectar [espacio]"><svg class="mark"><use href="#mk-play"/></svg></button>
+          <label class="tira-prueba safelight"><input type="checkbox" id="chk-wipe"> tira de prueba a/b</label>
+          <label class="tira-prueba safelight" title="preview a resolución completa (cuesta más GPU)"><input type="checkbox" id="chk-fina"> lupa fina</label>
+        </div>
+      </section>
+
+      <aside id="instrumentos">
+        <div class="susurro-titulo safelight">el panel de instrumentos</div>
+        <div id="controls"></div>
+      </aside>
+    </div>
+
+    <!-- el cajón de gelatinas (bandeja que sube) -->
+    <div id="cajon" class="cerrado">
+      <div class="cajon-inner">
+        <div class="susurro-titulo">gelatinas de entrada <span class="mano">(la cámara)</span></div>
+        <div id="gels-entrada" class="gel-fila"></div>
+        <div class="susurro-titulo">gelatinas de color <span class="mano">(el alma)</span></div>
+        <div id="gels-color" class="gel-fila"></div>
+        <button id="cierra-cajon" class="cajon-btn">cerrar el cajón</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ══ SALA 3 · EL REVELADO (la sala húmeda) ══ -->
+  <main id="room-rev" class="room">
+    <div class="rev-inner">
+      <div class="rev-head">
+        <span class="shout small" data-ink="EL REVELADO">EL REVELADO</span>
+        <span class="susurro">de la mesa de montaje al máster · <span id="rev-resumen"></span></span>
+      </div>
+
+      <div class="rev-banco">
+        <label class="etiqueta-lata">
+          <span class="susurro-titulo">etiqueta de la lata</span>
+          <input type="text" id="out-name" value="bobina">
+        </label>
+        <label class="etiqueta-lata" title="códec y calidad del máster">
+          <span class="susurro-titulo">máster</span>
+          <select id="rev-codec">
+            <option value="hevc-alta">HEVC · calidad alta</option>
+            <option value="hevc-media">HEVC · calidad media</option>
+            <option value="prores422hq">ProRes 422 HQ · máster</option>
+            <option value="prores4444">ProRes 4444 · máster</option>
+          </select>
+        </label>
+        <label class="etiqueta-lata" title="fundido desde negro al empezar">
+          <span class="susurro-titulo">apertura (s)</span>
+          <input type="number" id="rev-fh" min="0" max="10" step="0.1" value="0">
+        </label>
+        <label class="etiqueta-lata" title="fundido a negro al terminar">
+          <span class="susurro-titulo">cierre (s)</span>
+          <input type="number" id="rev-ft" min="0" max="10" step="0.1" value="0">
+        </label>
+        <label class="etiqueta-lata" title="normalizar la sonoridad a −16 LUFS (plataformas)">
+          <span class="susurro-titulo">sonoridad</span>
+          <label class="susurro"><input type="checkbox" id="rev-loud"> normalizar</label>
+        </label>
+        <label class="etiqueta-lata hidden" id="lbl-range" title="revelar solo el tramo marcado con I/O">
+          <span class="susurro-titulo">tramo</span>
+          <label class="susurro"><input type="checkbox" id="rev-range" checked> solo lo marcado</label>
+        </label>
+        <button id="btn-render" class="inkbtn">revelar la bobina</button>
+        <button id="btn-cancel" class="inkbtn rojo hidden">parar el revelado</button>
+      </div>
+
+      <!-- las cubetas -->
+      <div id="cubetas">
+        <div class="cubeta" data-paso="revelador"><div class="liquido"></div><span>revelador</span></div>
+        <div class="cubeta" data-paso="paro"><div class="liquido"></div><span>baño de paro</span></div>
+        <div class="cubeta" data-paso="fijador"><div class="liquido"></div><span>fijador</span></div>
+        <div class="cubeta" data-paso="lavado"><div class="liquido"></div><span>lavado</span></div>
+      </div>
+      <div id="rev-step" class="susurro"></div>
+      <pre id="render-log" class="hidden"></pre>
+
+      <!-- la cuerda de secado -->
+      <div id="cuerda-wrap">
+        <svg id="abeja" viewBox="0 0 64 48"><use href="#d-bee"/></svg>
+        <svg id="cuerda-svg" preserveAspectRatio="none" viewBox="0 0 100 10">
+          <path d="M0 3 Q 50 8 100 3" fill="none" stroke-width="0.55"/>
+        </svg>
+        <div id="tendedero"></div>
+      </div>
+
+      <!-- estantería de bobinas reveladas -->
+      <div class="susurro-titulo" style="margin-top:18px">bobinas reveladas <span class="mano">¡que aproveche!</span></div>
+      <div id="reveladas"></div>
+
+      <div class="colofon">
+        <div class="c-title">colofón</div>
+        <ul>
+          <li>hecho a mano en los Laboratorios Saorín · dos tintas sobre papel hueso</li>
+          <li>papel: escaneo del Royal Museums Greenwich (dominio público)</li>
+          <li>foto del laboratorio: Library of Congress, años 30 (dominio público)</li>
+          <li>motor del look: el mismo del laboratorio del Mac, al fotograma</li>
+        </ul>
+        <div class="barcode"><span>LAB·SAORIN·2026</span></div>
+      </div>
+    </div>
+  </main>
+
+</div>
+
+<!-- el pliegue del cuarto oscuro (papel terracota de verdad) -->
+<div id="pliegue" class="hidden">
+  <div class="hoja h-t"></div><div class="hoja h-b"></div>
+  <div class="hoja h-l"></div><div class="hoja h-r"></div>
+</div>
+
+<!-- cola de cabecera al abrir -->
+<canvas id="leader"></canvas>
+
+<!-- marcas dibujadas a mano -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="mk-play" viewBox="0 0 24 24">
+      <path d="M7.2 4.6 C7.6 8.1 7.4 15.8 7.1 19.4 C11.2 17.2 15.9 14.4 19.3 12.2 C15.8 9.6 10.9 6.6 7.2 4.6 Z"/>
+    </symbol>
+    <symbol id="mk-pause" viewBox="0 0 24 24">
+      <path d="M8.1 5.2 C7.8 9.4 7.9 14.8 8.2 18.9" fill="none" stroke-width="3.2"/>
+      <path d="M15.9 5.0 C16.2 9.2 16.0 14.9 15.8 19.1" fill="none" stroke-width="3.2"/>
+    </symbol>
+    <symbol id="mk-step-l" viewBox="0 0 24 24"><path d="M16.8 5.3 C13.9 7.6 11.2 9.9 8.6 12.1 C11.3 14.2 14.2 16.5 16.6 18.6" fill="none" stroke-width="3.6"/><path d="M11.2 5.6 C8.6 7.8 6.4 9.9 4.4 11.9 C6.5 13.9 8.8 16.1 10.9 18.2" fill="none" stroke-width="2.2" opacity="0.45"/></symbol>
+    <symbol id="mk-step-r" viewBox="0 0 24 24"><path d="M7.4 5.2 C10.2 7.5 13.0 9.8 15.6 12.0 C12.9 14.2 10.0 16.6 7.6 18.7" fill="none" stroke-width="3.6"/><path d="M13.0 5.5 C15.5 7.7 17.7 9.8 19.7 11.8 C17.6 13.8 15.3 16.0 13.2 18.1" fill="none" stroke-width="2.2" opacity="0.45"/></symbol>
+    <symbol id="mk-home" viewBox="0 0 24 24">
+      <path d="M7.0 4.9 C7.2 9.5 7.1 14.6 7.0 19.0" fill="none" stroke-width="2.8"/>
+      <path d="M17.9 5.4 C14.8 7.7 12.0 9.9 9.6 12.0 C12.2 14.1 15.0 16.4 17.6 18.5" fill="none" stroke-width="2.4"/>
+    </symbol>
+    <symbol id="mk-end" viewBox="0 0 24 24">
+      <path d="M17.2 5.0 C17.0 9.6 17.1 14.7 17.2 19.1" fill="none" stroke-width="2.8"/>
+      <path d="M6.3 5.5 C9.3 7.8 12.1 10.0 14.5 12.1 C11.9 14.2 9.0 16.5 6.5 18.6" fill="none" stroke-width="2.4"/>
+    </symbol>
+    <symbol id="mk-bell" viewBox="0 0 24 24">
+      <path d="M12.0 4.6 C8.6 5.2 7.2 8.0 7.1 11.2 C7.0 13.8 6.4 15.5 5.2 16.7 C9.7 17.4 14.5 17.4 18.8 16.6 C17.5 15.4 17.0 13.7 16.9 11.1 C16.8 7.9 15.3 5.1 12.0 4.6 Z" fill="none" stroke-width="2.0"/>
+      <path d="M10.3 18.9 C10.8 19.9 13.2 19.9 13.7 18.8" fill="none" stroke-width="2.0"/>
+    </symbol>
+  </defs>
+</svg>
+
+<script src="/engine/lib/mp4box.all.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

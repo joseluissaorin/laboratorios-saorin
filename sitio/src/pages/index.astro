@@ -1,0 +1,318 @@
+---
+import '../styles/global.css';
+import Salas from '../components/Salas.jsx';
+
+const REPO = 'https://github.com/joseluissaorin/laboratorios-saorin';
+const titulo = 'Laboratorios Saorín — editor de vídeo con revelado fílmico en la GPU';
+const desc =
+  'Un editor de vídeo nativo que monta, revela y saca el máster más rápido que el tiempo real. ' +
+  'Cadena fílmica completa en la GPU, motores de vídeo del chip, macOS y Windows. Código abierto, MIT.';
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{titulo}</title>
+    <meta name="description" content={desc} />
+    <link rel="canonical" href="https://laboratorios.joseluissaorin.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={titulo} />
+    <meta property="og:description" content={desc} />
+    <meta property="og:image" content="https://laboratorios.joseluissaorin.com/cap/mesa.jpg" />
+    <meta property="og:locale" content="es_ES" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#f5f2ea" />
+  </head>
+
+  <body>
+    <header class="cabecera">
+      <div class="envoltura">
+        <span class="marca grot">LABORATORIOS <span class="rojo">SAORÍN</span></span>
+        <nav>
+          <a href="#salas">Las salas</a>
+          <a href="#revelado" class="opcional">El revelado</a>
+          <a href="#motor">El motor</a>
+          <a href={REPO}>Código</a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- ── EL TITULAR ─────────────────────────────────────────────────── -->
+    <div class="envoltura titular">
+      <h1>Un editor que no<br />parece <span class="rojo">software</span>.</h1>
+      <p class="reclamo">
+        Monta, revela y saca el máster más rápido que el tiempo real — con una
+        cadena fílmica de verdad corriendo en la GPU.
+      </p>
+      <p class="entradilla">
+        No hay paneles grises ni un inspector con doscientas casillas. Hay un
+        taller con tres salas: una mesa de montaje, un cuarto oscuro y un
+        revelado. macOS y Windows. Código abierto.
+      </p>
+      <div class="botonera">
+        <a class="boton primario" href={REPO}>Ver el código y compilarlo</a>
+        <a class="boton" href="#salas">Enseñármelo</a>
+      </div>
+      <p class="pie-boton">
+        Rust + wgpu · MIT · sin cuenta, sin nube, sin suscripción
+      </p>
+    </div>
+
+    <figure class="portada envoltura">
+      <img
+        src="/cap/mesa.jpg"
+        alt="La mesa de montaje de Laboratorios Saorín, con la estantería de material, el visor y la bobina"
+        width="1482" height="940" fetchpriority="high"
+      />
+    </figure>
+
+    <!-- ── LAS CIFRAS ─────────────────────────────────────────────────── -->
+    <section class="franja">
+      <div class="envoltura">
+        <p class="rotulo">Medido, no prometido</p>
+        <div class="cifras">
+          <div class="cifra">
+            <span class="n">541 fps</span>
+            <span class="q">la cadena fílmica sola, en un M4&nbsp;Max</span>
+          </div>
+          <div class="cifra">
+            <span class="n">161–187</span>
+            <span class="q">fps revelando bobina en 4K</span>
+          </div>
+          <div class="cifra">
+            <span class="n">73–83</span>
+            <span class="q">fps en una Radeon 890M de portátil</span>
+          </div>
+          <div class="cifra">
+            <span class="n">0,7 s</span>
+            <span class="q">volver a sacar algo ya revelado</span>
+          </div>
+        </div>
+        <p class="apunte" style="margin-top:26px">
+          Con material real —HEVC 4K de 10 bits a 59,94— y no en un banco
+          sintético. En las dos máquinas el límite ya no es el look: es el
+          codificador de vídeo del chip. La cadena entera cuesta 0,1 ms de cada 6.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── LAS TRES SALAS ─────────────────────────────────────────────── -->
+    <section id="salas">
+      <div class="envoltura">
+        <p class="rotulo">El taller</p>
+        <h2>Tres salas, y cada una hace una cosa</h2>
+        <p class="sumario">
+          Montar, decidir el color y sacar la copia son tres oficios distintos.
+          Aquí son tres sitios distintos, y no hay que buscar nada en un menú.
+        </p>
+        <Salas client:visible />
+      </div>
+    </section>
+
+    <!-- ── EL REVELADO ────────────────────────────────────────────────── -->
+    <section id="revelado" class="oscura">
+      <div class="envoltura">
+        <p class="rotulo">La cadena fílmica</p>
+        <h2>Un revelado de verdad, no un filtro</h2>
+        <p class="sumario">
+          Cada pieza está donde estaría en un laboratorio, y en ese orden. Lo que
+          ves en la previsualización es exactamente lo que sale por la puerta:
+          el mismo shader, el mismo fotograma.
+        </p>
+        <div class="rejilla tres">
+          <div class="ficha">
+            <h3>La curva del negativo</h3>
+            <p>
+              Exposición, push/pull y un hombro exponencial en las altas luces
+              que recupera el superblanco en vez de aplastarlo a gris.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Gelatinas 3D</h3>
+            <p>
+              LUT de entrada y de color en .cube, interpoladas por tetraedros —
+              lo que usa el mundo del etalonaje, y lo que respeta los grises.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Halación y floración</h3>
+            <p>
+              El halo rojo alrededor de las luces fuertes, con su umbral, su
+              tono y su extensión. Y el brillo que desborda, aparte.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Grano por zonas</h3>
+            <p>
+              Tamaño, aspereza, croma, desenfoque y peso distinto en sombras,
+              medios y altas. No es ruido encima: se revela con la imagen.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Obturador y mecánica</h3>
+            <p>
+              Arrastre de obturador que no cruza un corte, tejido del negativo,
+              parpadeo y respiración del proyector.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>El filtro ND, deshecho</h3>
+            <p>
+              El infrarrojo que cuela un ND tiñe los negros de granate. Se quita
+              lo que sobra, pesado a sombras y protegido por saturación: el rojo
+              de verdad no se toca.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── EL MOTOR ───────────────────────────────────────────────────── -->
+    <section id="motor">
+      <div class="envoltura">
+        <p class="rotulo">Por dentro</p>
+        <h2>Un motor propio, no una capa sobre ffmpeg</h2>
+        <p class="sumario">
+          La bobina se compila a una tabla con un renglón por fotograma de
+          salida, y se recorre una sola vez. El corte deja de ser una fase, el
+          encadenado deja de ser una pasada, y nada se re-comprime dos veces.
+        </p>
+        <div class="rejilla dos">
+          <div class="ficha">
+            <h3>Sin copias a la CPU</h3>
+            <p>
+              VideoToolbox y Metal en el Mac; Media Foundation, D3D12 y AMF en
+              Windows. El fotograma decodificado va a la GPU y no vuelve.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Un shader, dos plataformas</h3>
+            <p>
+              El look se escribe una vez en WGSL. Windows lo compila tal cual y
+              el Mac lo traduce a Metal al construir: no hay dos versiones que
+              se separen con el tiempo.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Cadencia sin tirón</h3>
+            <p>
+              Pasar de 59,94 a 24 saltaba dos y tres fotogramas alternándose. Se
+              interpola entre los dos vecinos: el movimiento avanza igual
+              siempre.
+            </p>
+          </div>
+          <div class="ficha">
+            <h3>Caché por tramos</h3>
+            <p>
+              Cambiar el color de un plano recalcula ese plano. Volver a sacar
+              una bobina que no ha cambiado es copiar un fichero.
+            </p>
+          </div>
+        </div>
+
+        <h3 style="margin-top:46px; font-size:20px">Lo que sale por la puerta</h3>
+        <table class="medidas" style="margin-top:14px">
+          <thead>
+            <tr><th>Sello</th><th>Qué hace</th><th>Cuándo</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="dato">REVELAR</td>
+              <td>HEVC de 10 bits con el motor del chip, al lienzo y sin escalar</td>
+              <td class="tenue">casi siempre</td>
+            </tr>
+            <tr>
+              <td class="dato">ARCHIVO</td>
+              <td>ProRes HQ, dos motores en paralelo en el Mac</td>
+              <td class="tenue">para guardar</td>
+            </tr>
+            <tr>
+              <td class="dato">EN CLIPS</td>
+              <td>Una carpeta con un fichero por plano, ya revelado y con su sonido</td>
+              <td class="tenue">para montar en otro sitio</td>
+            </tr>
+            <tr>
+              <td class="dato">A MANO</td>
+              <td>Hasta 8K, supermuestreo, códec, caudal, filtro y cadencia</td>
+              <td class="tenue">cuando manda el destino</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── LA IDEA ────────────────────────────────────────────────────── -->
+    <section class="franja">
+      <div class="envoltura rejilla dos" style="align-items:center">
+        <blockquote class="cita">
+          Las metáforas mandan sobre la implementación: si en un laboratorio el
+          fundido se hace sobre la copia revelada y no sobre el negativo, aquí
+          también — y resulta que además es más rápido.
+        </blockquote>
+        <div>
+          <p class="rotulo">Por qué existe</p>
+          <p style="margin-top:0">
+            Porque los editores serios se parecen todos y ninguno se parece a un
+            oficio. La interfaz se dibuja con el mismo pipeline de GPU que el
+            vídeo: el papel, los trazos a pulso y las latas de película no son
+            imágenes pegadas, son shaders.
+          </p>
+          <p class="apunte">
+            Es software de autor, hecho para usarse a diario. Lo que hay medido
+            está medido en dos máquinas concretas; lo que falta, está escrito
+            en los documentos del repositorio sin dorarlo.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ABIERTO ────────────────────────────────────────────────────── -->
+    <section>
+      <div class="envoltura">
+        <p class="rotulo">Código abierto</p>
+        <h2>Cógelo, compílalo, cámbialo</h2>
+        <p class="sumario">
+          Licencia MIT. Sin cuenta, sin nube, sin telemetría y sin suscripción:
+          se compila con <code>cargo build --release</code> y el material no
+          sale de tu disco.
+        </p>
+        <div class="botonera">
+          <a class="boton primario" href={REPO}>El repositorio</a>
+          <a class="boton" href={`${REPO}#cómo-se-instala`}>Cómo se compila</a>
+        </div>
+        <p class="apunte" style="margin-top:20px">
+          Requiere macOS con Apple Silicon o Windows 11 con GPU reciente. Se ha
+          probado en un MacBook Pro M4 Max y en un GPD Win Max 2 con Radeon
+          890M — cualquier dato de otra máquina se agradece.
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <div class="envoltura colofon">
+        <p class="grot" style="color:var(--tinta); font-size:16px">COLOFÓN</p>
+        <p>— hecho a mano en los Laboratorios Saorín · dos tintas sobre papel hueso</p>
+        <p>— el motor del look: el mismo del laboratorio, al fotograma</p>
+        <p>
+          — <a href={REPO}>código</a> ·
+          <a href="https://joseluissaorin.com">José Luis Saorín</a> · MIT · 2026
+        </p>
+      </div>
+    </footer>
+
+    <style>
+      .portada { padding: 12px 28px 62px; }
+      .portada img {
+        width: 100%; height: auto; display: block; border-radius: 3px;
+        border: 1px solid var(--papel-borde);
+        box-shadow: 0 26px 60px rgba(29, 27, 22, 0.18);
+      }
+      code {
+        font-family: ui-monospace, Menlo, monospace; font-size: 0.86em;
+        background: rgba(29, 27, 22, 0.06); padding: 2px 6px; border-radius: 2px;
+      }
+    </style>
+  </body>
+</html>

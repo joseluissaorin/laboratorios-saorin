@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Laboratorios Saorín — un editor de vídeo que no parece software</title>
+<meta name="description" content="Editor de vídeo y revelado fílmico en la GPU. Rust + wgpu, macOS y Windows. Código abierto, MIT. 4K60 más rápido que el tiempo real.">
+<meta property="og:title" content="Laboratorios Saorín">
+<meta property="og:description" content="Un editor de vídeo que no parece software. Montaje y revelado fílmico en la GPU, en Rust. Código abierto.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="/cap/01_mesa.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2efe6'/><circle cx='50' cy='50' r='30' fill='none' stroke='%23d93324' stroke-width='9'/><circle cx='50' cy='50' r='9' fill='%231a2fb0'/></svg>">
+
+<style>
+@font-face{font-family:Grot;src:url(/fuentes/SpaceGrotesk-Bold.woff2) format('woff2');font-weight:700;font-display:swap}
+@font-face{font-family:Grot;src:url(/fuentes/SpaceGrotesk-Regular.woff2) format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:Serifa;src:url(/fuentes/Fraunces-Variable.woff2) format('woff2');font-display:swap}
+@font-face{font-family:Mano;src:url(/fuentes/Caveat-Variable.woff2) format('woff2');font-display:swap}
+
+:root{
+  --papel:#f2efe6; --papel2:#e9e5d9;
+  --tinta:#1c1a16; --azul:#1a2fb0; --rojo:#d93324;
+  --ambar:#f2c743; --tenue:#8a857a;
+  --ancho:min(1180px, 92vw);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--papel); color:var(--tinta);
+  font-family:Grot,system-ui,sans-serif; font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(ellipse at 18% 12%, rgba(0,0,0,.035), transparent 55%),
+    radial-gradient(ellipse at 82% 78%, rgba(120,90,40,.05), transparent 55%);
+}
+.wrap{width:var(--ancho); margin:0 auto}
+a{color:var(--azul)}
+
+/* la línea a pulso, el motivo de la casa */
+.pulso{display:block;width:100%;height:10px;overflow:visible;margin:0}
+.pulso path{fill:none;stroke:var(--azul);stroke-width:2.2;stroke-linecap:round}
+
+/* ── cabecera ─────────────────────────────────────────── */
+header{padding:clamp(48px,7vw,96px) 0 26px}
+h1{
+  font-family:Grot;font-weight:700;letter-spacing:-.02em;
+  font-size:clamp(38px,7.6vw,86px); line-height:.94; margin:0;
+  color:var(--azul); text-shadow:.055em .055em 0 var(--rojo);
+}
+h1 em{font-style:normal;color:var(--rojo);text-shadow:.055em .055em 0 var(--azul)}
+.lema{font-family:Mano;font-size:clamp(21px,2.7vw,31px);color:var(--tenue);margin:.5em 0 0}
+.chapas{display:flex;flex-wrap:wrap;gap:9px;margin:30px 0 0}
+.chapa{
+  font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;
+  border:1.6px solid var(--tinta);padding:5px 11px;border-radius:2px;
+  transform:rotate(-.5deg);background:rgba(255,255,255,.5)
+}
+.chapa.r{border-color:var(--rojo);color:var(--rojo);transform:rotate(.7deg)}
+
+.entradilla{
+  font-family:Serifa;font-size:clamp(19px,2.2vw,24px);line-height:1.5;
+  max-width:60ch;margin:34px 0 0
+}
+.botones{display:flex;flex-wrap:wrap;gap:13px;margin:34px 0 0}
+.btn{
+  display:inline-block;text-decoration:none;font-weight:700;font-size:15px;
+  padding:13px 24px;border:2px solid var(--tinta);color:var(--papel);
+  background:var(--tinta);transform:rotate(-.35deg);
+  box-shadow:4px 5px 0 rgba(28,26,22,.22);transition:transform .12s,box-shadow .12s
+}
+.btn:hover{transform:rotate(-.35deg) translate(-2px,-2px);box-shadow:6px 7px 0 rgba(28,26,22,.28)}
+.btn.hueco{background:transparent;color:var(--tinta);box-shadow:none}
+.btn.hueco:hover{background:rgba(0,0,0,.05)}
+
+/* ── secciones ────────────────────────────────────────── */
+section{padding:clamp(46px,6vw,86px) 0}
+h2{
+  font-family:Grot;font-weight:700;font-size:clamp(26px,3.7vw,44px);
+  letter-spacing:-.015em;margin:0 0 8px;color:var(--tinta)
+}
+h2 .n{color:var(--rojo);font-size:.55em;vertical-align:.55em;margin-right:.35em}
+.sub{font-family:Mano;font-size:clamp(18px,2.1vw,24px);color:var(--rojo);margin:0 0 30px}
+
+/* las tres salas */
+.salas{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:26px;margin-top:12px}
+.sala{background:rgba(255,255,255,.55);border:1.8px solid var(--azul);padding:22px 20px;transform:rotate(-.25deg)}
+.sala:nth-child(2){transform:rotate(.4deg)}
+.sala:nth-child(3){transform:rotate(-.5deg)}
+.sala h3{font-family:Grot;font-weight:700;font-size:19px;margin:0 0 4px;letter-spacing:.01em}
+.sala .q{font-family:Mano;font-size:19px;color:var(--rojo);margin:0 0 10px}
+.sala p{margin:0;font-size:15.5px;color:#3a362e}
+
+/* capturas */
+.tira{margin:36px 0 0}
+figure{margin:0 0 40px}
+figure img{
+  width:100%;height:auto;display:block;border:1.8px solid var(--tinta);
+  box-shadow:7px 8px 0 rgba(28,26,22,.15)
+}
+figcaption{font-family:Mano;font-size:19px;color:var(--tenue);margin-top:11px}
+figcaption b{color:var(--tinta);font-family:Grot;font-weight:700;font-size:14px;
+  letter-spacing:.05em;text-transform:uppercase;margin-right:.6em}
+
+/* cifras */
+.cifras{width:100%;border-collapse:collapse;margin-top:14px;font-size:15px}
+.cifras th,.cifras td{text-align:left;padding:11px 12px;border-bottom:1.4px solid rgba(28,26,22,.16)}
+.cifras thead th{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--tenue);border-bottom-color:var(--tinta)}
+.cifras td b{color:var(--rojo);font-size:1.12em}
+.cifras td:first-child{font-family:Serifa}
+.nota{font-family:Mano;font-size:19px;color:var(--tenue);margin-top:18px}
+
+/* el bloque de código */
+pre{
+  background:#181713;color:#e8e3d6;padding:20px 22px;overflow-x:auto;
+  font-size:13.5px;line-height:1.75;border-left:5px solid var(--rojo);margin:22px 0
+}
+pre .c{color:#8f8a7c}
+pre .k{color:var(--ambar)}
+code{font-size:.92em;background:rgba(0,0,0,.06);padding:.12em .38em}
+
+/* lo aprendido */
+.lecciones{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:22px;margin-top:10px}
+.leccion{border-left:4px solid var(--rojo);padding:4px 0 4px 18px}
+.leccion h3{font-family:Grot;font-weight:700;font-size:17px;margin:0 0 6px}
+.leccion p{margin:0;font-size:15.5px;color:#3a362e}
+
+/* pie */
+footer{padding:56px 0 76px;font-size:14px;color:var(--tenue)}
+footer .colofon{font-family:Grot;font-weight:700;font-size:11.5px;letter-spacing:.1em;color:var(--tinta);margin-bottom:10px}
+footer p{margin:.3em 0}
+
+@media (max-width:640px){
+  body{font-size:16px}
+  .btn{padding:12px 18px;font-size:14px}
+}
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <h1>LABORATORIOS <em>SAORÍN</em></h1>
+  <p class="lema">un editor de vídeo que no parece software</p>
+
+  <div class="chapas">
+    <span class="chapa">Rust + wgpu</span>
+    <span class="chapa">macOS · Windows</span>
+    <span class="chapa r">MIT</span>
+    <span class="chapa">4K60 más rápido que el tiempo real</span>
+  </div>
+
+  <p class="entradilla">
+    Monta, revela y saca el máster. La cadena fílmica entera en la GPU —curva
+    del negativo, gelatinas, halación, grano, obturador— y una interfaz que
+    <strong>se dibuja con el mismo pipeline que el vídeo</strong>: papel hueso
+    procedural, trazos a pulso, latas en una estantería y un cubo de recortes
+    donde dejas lo que aún no sabes dónde va.
+  </p>
+
+  <div class="botones">
+    <a class="btn" href="https://github.com/joseluissaorin/laboratorios-saorin">Ver el código</a>
+    <a class="btn hueco" href="#salas">Las tres salas</a>
+    <a class="btn hueco" href="#cifras">Las cifras</a>
+  </div>
+</header>
+
+<svg class="pulso wrap" viewBox="0 0 1000 10" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M2,6 C 90,3 140,8 230,5 S 400,8 490,4 S 660,7 750,5 S 910,8 998,5"/>
+</svg>
+
+<section class="wrap" id="salas">
+  <h2><span class="n">§1</span>Tres salas, no tres pestañas</h2>
+  <p class="sub">porque un taller tiene sitios, y en cada sitio se hace una cosa</p>
+
+  <div class="salas">
+    <div class="sala">
+      <h3>LA MESA</h3>
+      <p class="q">aquí se corta</p>
+      <p>Estantería de latas con miniaturas instantáneas, la bobina con su cinta
+      de empalme, la manivela para recorrer la película, el cubo de recortes
+      —infinito— y la ficha del clip. Se arrastra, se corta al fotograma, se
+      encadena.</p>
+    </div>
+    <div class="sala">
+      <h3>EL CUARTO OSCURO</h3>
+      <p class="q">aquí se decide el color</p>
+      <p>Luz roja de seguridad. Los baños en frascos de vidrio, los stocks en
+      cajas, y 52 parámetros del look en galvanómetros de laboratorio. Con
+      lupa cuentahílos para mirar el grano al 100 %.</p>
+    </div>
+    <div class="sala">
+      <h3>EL REVELADO</h3>
+      <p class="q">aquí sale el máster</p>
+      <p>Cuatro cubetas por las que pasa la tira mientras se revela, la cuerda
+      de secado donde se cuelga lo terminado, y un solo botón: el códec que
+      mastica el chip que tengas debajo, y nada más.</p>
+    </div>
+  </div>
+
+  <div class="tira">
+    <figure>
+      <img src="/cap/01_mesa.jpg" alt="La mesa de montaje: estantería de material a la izquierda, visor con imagen en vivo en el centro, ficha del clip a la derecha y la bobina abajo" loading="lazy" width="1600" height="1031">
+      <figcaption><b>La mesa</b>todo lo que ves está dibujado con el mismo pipeline que el vídeo</figcaption>
+    </figure>
+    <figure>
+      <img src="/cap/02_cuarto.jpg" alt="El cuarto oscuro con luz roja: frascos de químicos, cajas de stock y el panel de galvanómetros" loading="lazy" width="1600" height="1031">
+      <figcaption><b>El cuarto oscuro</b>los baños, los stocks y el panel de instrumentos</figcaption>
+    </figure>
+    <figure>
+      <img src="/cap/03_revelado.jpg" alt="La sala de revelado: cubetas de químicos y la cuerda de secado con los másteres colgados" loading="lazy" width="1600" height="1031">
+      <figcaption><b>El revelado</b>la tira pasa por las cubetas mientras se revela; el progreso ES la película</figcaption>
+    </figure>
+  </div>
+</section>
+
+<svg class="pulso wrap" viewBox="0 0 1000 10" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M2,5 C 120,8 180,3 270,6 S 430,3 520,7 S 700,4 790,6 S 920,3 998,6"/>
+</svg>
+
+<section class="wrap" id="motor">
+  <h2><span class="n">§2</span>El revelado es un compositor, no una tubería</h2>
+  <p class="sub">la idea que hizo que todo fuera el doble de rápido</p>
+
+  <p style="max-width:66ch">
+    Antes, revelar significaba cinco procesos pasándose ficheros comprimidos:
+    ffmpeg cortaba cada pieza, el motor le pasaba el look, otro ffmpeg
+    recodificaba el máster <em>completo</em> para meter los fundidos, y un
+    tercero concatenaba. El material se comprimía tres veces.
+  </p>
+  <p style="max-width:66ch">
+    Ahora la bobina se compila a una <strong>tabla con un renglón por fotograma
+    de salida</strong> —de qué fuente sale, en qué segundo, con qué receta y con
+    cuánto peso se encadena— y el motor la recorre de un tirón:
+  </p>
+
+<pre><span class="c">// un fotograma de salida</span>
+struct <span class="k">Renglon</span> {
+    fuente_a: u32,      <span class="c">// de qué fuente sale</span>
+    fuente_b: u32,      <span class="c">// el otro lado del encadenado</span>
+    peso_b:   f32,      <span class="c">// cuánto pesa el segundo lado</span>
+    t_a, t_b: f64,      <span class="c">// en qué segundo de cada fuente</span>
+    nivel_color: f32,   <span class="c">// fundido a negro o a blanco</span>
+}</pre>
+
+  <div class="lecciones">
+    <div class="leccion">
+      <h3>El corte deja de existir</h3>
+      <p>No es una operación: es que el renglón siguiente mire a otra fuente.
+      Ni pase extra, ni fichero intermedio, ni recodificación. La bobina no se
+      pega nunca porque no se despedaza nunca.</p>
+    </div>
+    <div class="leccion">
+      <h3>El encadenado es un <code>mix</code></h3>
+      <p>Se dibuja la segunda fuente encima con mezcla por alfa, dentro del
+      mismo pase. Antes costaba una pasada entera sobre el máster.</p>
+    </div>
+    <div class="leccion">
+      <h3>Y va donde iría en un laboratorio</h3>
+      <p>Un encadenado óptico es una doble exposición sobre el mismo negativo,
+      y el grano aparece <em>después</em>. Así que las dos imágenes se mezclan
+      justo tras el grade y el pase caro corre una sola vez. Más fiel
+      <em>y</em> más rápido: el grano no se duplica en la transición.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="cifras">
+  <h2><span class="n">§3</span>Las cifras, medidas</h2>
+  <p class="sub">en dos máquinas de verdad, con material de verdad</p>
+
+  <table class="cifras">
+    <thead>
+      <tr><th></th><th>MacBook Pro M4 Max</th><th>GPD Win Max 2 · Radeon 890M</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>la cadena fílmica sola</td><td><b>541 fps</b></td><td>—</td></tr>
+      <tr><td>revelado de bobina, 4K</td><td><b>161–187 fps</b></td><td><b>73–83 fps</b></td></tr>
+      <tr><td>20 s de 4K60, extremo a extremo</td><td>13,5 s → <b>7,1 s</b></td><td>—</td></tr>
+      <tr><td>una bobina de 44 s</td><td>—</td><td>50,9 s → <b>17,5 s</b></td></tr>
+      <tr><td>lo mismo, ya revelado</td><td><b>0,7 s</b></td><td><b>1,3 s</b></td></tr>
+    </tbody>
+  </table>
+
+  <p class="nota">
+    material HEVC 4K 10 bits a 59,94 · en las dos máquinas el límite ya no es
+    la cadena fílmica, sino el codificador del chip: el look cuesta 0,1 ms de
+    cada 6 en el Mac
+  </p>
+</section>
+
+<svg class="pulso wrap" viewBox="0 0 1000 10" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M2,6 C 100,4 160,8 250,5 S 420,7 510,4 S 680,8 770,5 S 900,7 998,4"/>
+</svg>
+
+<section class="wrap">
+  <h2><span class="n">§4</span>Lo que aprendimos midiendo</h2>
+  <p class="sub">incluidas las veces que el plan era nuestro y estaba mal</p>
+
+  <div class="lecciones">
+    <div class="leccion">
+      <h3>El plan se equivocó de formato</h3>
+      <p>Proponía <code>RG11B10Float</code> para los intermedios. Medido: se
+      separa 43 dB del original. El bueno era <code>RGB10A2Unorm</code>, que
+      además ya usaba el motor de Windows — los dos másteres llevaban tiempo
+      sin ser el mismo fotograma.</p>
+    </div>
+    <div class="leccion">
+      <h3>El grano no es un hash</h3>
+      <p>La placa se sintetiza por FFT precisamente porque los hashes
+      procedurales dejan banding axial. Sustituirla habría sido «optimizar»
+      empeorando.</p>
+    </div>
+    <div class="leccion">
+      <h3>El look no era el cuello de botella</h3>
+      <p>Todo el plan se apoyaba en que éramos <em>bandwidth-bound</em>. Falso
+      en las dos máquinas: manda el codificador. Por eso la fusión a compute se
+      <strong>rechazó con datos</strong> en vez de implementarse por fe.</p>
+    </div>
+    <div class="leccion">
+      <h3>Y dos fallos que llevaban meses</h3>
+      <p>El máster se construía con búferes que el decodificador reciclaba
+      —fotogramas de otro sitio, distintos en cada revelado— y el sello de
+      tiempo nunca llegaba a la muestra. Los cazó un banco que exige
+      <em>idéntico al bit</em>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2><span class="n">§5</span>Cómo se prueba</h2>
+  <p class="sub">hace falta Rust y ffmpeg, nada más</p>
+
+<pre>git clone https://github.com/joseluissaorin/laboratorios-saorin
+cd laboratorios-saorin
+
+cargo build --release --manifest-path nativa/Cargo.toml   <span class="c"># la aplicación</span>
+cargo build --release --manifest-path shell/Cargo.toml    <span class="c"># el taller</span>
+cargo build --release --manifest-path metal/Cargo.toml    <span class="c"># motor · macOS</span>
+<span class="c"># en Windows: winlab/Cargo.toml</span>
+
+./nativa/target/release/saorin-nativa</pre>
+
+  <p style="max-width:66ch">
+    El taller vive en <code>~/filmlab</code>: dentro van <code>media/</code>,
+    <code>projects/</code>, <code>luts/</code> y <code>out/</code>. El material
+    <strong>se importa por referencia</strong>: no se copia un solo byte.
+  </p>
+
+  <div class="botones">
+    <a class="btn" href="https://github.com/joseluissaorin/laboratorios-saorin">El repositorio</a>
+    <a class="btn hueco" href="https://github.com/joseluissaorin/laboratorios-saorin/blob/main/ARQUITECTURA.md">Cómo está hecho</a>
+    <a class="btn hueco" href="https://github.com/joseluissaorin/laboratorios-saorin/blob/main/MOTOR.md">El motor, por dentro</a>
+  </div>
+</section>
+
+<svg class="pulso wrap" viewBox="0 0 1000 10" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M2,4 C 110,7 170,3 260,6 S 430,4 520,7 S 690,3 780,6 S 910,4 998,7"/>
+</svg>
+
+<footer class="wrap">
+  <p class="colofon">COLOFÓN</p>
+  <p>— hecho a mano en los Laboratorios Saorín · dos tintas sobre papel hueso</p>
+  <p>— el motor del look: el mismo del laboratorio, al fotograma</p>
+  <p>— código bajo licencia MIT · las tipografías, OFL · las transformadas log
+     de fabricante no se distribuyen</p>
+  <p style="margin-top:14px">
+    <a href="https://github.com/joseluissaorin/laboratorios-saorin">github</a> ·
+    <a href="https://joseluissaorin.com">joseluissaorin.com</a>
+  </p>
+</footer>
+
+</body>
+</html>

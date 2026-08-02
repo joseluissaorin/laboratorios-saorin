@@ -1,0 +1,51 @@
+[package]
+name = "saorin-nativa"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "saorin-nativa"
+path = "src/main.rs"
+
+[dependencies]
+filmlook-core = { path = "../core" }
+wgpu = "24"
+winit = "0.30"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+anyhow = "1"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+glyphon = "0.8"
+cpal = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["isomp4", "aac"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.15"
+ab_glyph = "0.2"
+raw-window-handle = "0.6"
+
+# el ARRASTRE FUERA de la ventana (NORTE §7.16) necesita las API del sistema
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+
+# la MISMA versión que el core (windows-rs sella los traits *_Impl por
+# versión: mezclar 0.58 y 0.61 rompe #[implement])
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "implement",
+    "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole",
+    "Win32_System_Memory", "Win32_System_SystemServices", "Win32_UI_Shell",
+] }
+# el macro #[implement] de 0.58 emite rutas `windows_core::…`
+windows-core = "0.58"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# EL ICONO DEL .EXE. winit pone el de la ventana y el de la barra de tareas en
+# tiempo de ejecución, pero el que sale en el Explorador, en el acceso directo
+# y al hacer alt-tab es un RECURSO de Win32 incrustado al compilar. Sin esto
+# la app tiene el icono genérico de Windows por mucho que la ventana no.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"

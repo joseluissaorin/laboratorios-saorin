@@ -1,0 +1,50 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>banco</title>
+<script src="/engine/lib/mp4box.all.min.js"></script></head>
+<body><pre id="out">…</pre>
+<script type="module">
+import { ClipDecoder } from "./js/engine-decode.js";
+const log = [];
+const di = (m) => { log.push(m); document.getElementById("out").textContent = log.join("\n");
+  fetch("/api/log", { method: "POST", body: m }); };
+const q = new URLSearchParams(location.search);
+const clip = q.get("f") || "master.mp4";
+const url = "/media/" + encodeURIComponent(clip);
+try {
+  const t0 = performance.now();
+  const d = await new ClipDecoder().open(url);
+  di(`abrir: ${(performance.now() - t0).toFixed(0)} ms · ${d.samples.length} samples · ${d.fps.toFixed(2)} fps · ${(d.size/1e6).toFixed(0)} MB`);
+  // seeks en frío (aún sin descarga masiva)
+  let acc = 0;
+  for (const t of [1, 4, 2, 7, 3]) {
+    const a = performance.now();
+    const f = await d.seek(t);
+    acc += performance.now() - a;
+    if (f) f.close();
+  }
+  di(`seek FRÍO medio: ${(acc / 5).toFixed(0)} ms`);
+  // decodificación secuencial (lo que hace la reproducción)
+  await d.seek(0);
+  let n = 0; const b = performance.now();
+  while (n < 120) { const f = await d.next(); if (!f) break; f.close(); n++; }
+  const secFrio = (performance.now() - b) / 1000;
+  di(`secuencial FRÍO: ${(n / secFrio).toFixed(1)} fps (${n} frames)`);
+  // esperar a la descarga masiva
+  const w = performance.now();
+  while (!d._todo && performance.now() - w < 60000) await new Promise((r) => setTimeout(r, 200));
+  di(`descarga masiva: ${d._todo ? ((performance.now() - w) / 1000).toFixed(1) + " s" : "NO LLEGÓ"}`);
+  acc = 0;
+  for (const t of [1, 4, 2, 7, 3]) {
+    const a = performance.now();
+    const f = await d.seek(t);
+    acc += performance.now() - a;
+    if (f) f.close();
+  }
+  di(`seek CALIENTE medio: ${(acc / 5).toFixed(0)} ms`);
+  await d.seek(0);
+  n = 0; const b2 = performance.now();
+  while (n < 240) { const f = await d.next(); if (!f) break; f.close(); n++; }
+  const secCal = (performance.now() - b2) / 1000;
+  di(`secuencial CALIENTE: ${(n / secCal).toFixed(1)} fps (${n} frames)`);
+  di("FIN");
+} catch (e) { di("ERROR: " + (e && e.message || e)); }
+</script></body></html>

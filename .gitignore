@@ -1,0 +1,44 @@
+# compilación
+target/
+node_modules/
+*.rlib
+*.rmeta
+
+# EL BANCO DE PRUEBAS: restos de experimentos, material de rodaje y másteres.
+# Nada de aquí hace falta para compilar ni para correr — son las sobras de
+# haber ido probando cosas con metraje real.
+assets/
+app/src-tauri/gen/
+app/src-tauri/target/
+
+# vídeo y másteres (el taller de cada uno es suyo)
+*.mp4
+*.mov
+*.mxf
+*.braw
+!studio/**/*.mp4
+
+# lo que fabrica el taller al usarse
+.cache/
+.proxies/
+.thumbs/
+.tmp/
+out/
+work/
+*.log
+
+# las capturas de la web sí van (son el escaparate)
+!web/cap/*.jpg
+
+# sistema
+.DS_Store
+Thumbs.db
+
+# el sitio: se compila, no se versiona
+sitio/dist/
+sitio/.astro/
+
+# EL PARTE INTERNO no sale a un repositorio público: lleva la dirección de la
+# máquina de pruebas, sus rutas y un diario de traspaso entre sesiones. Nada
+# de eso le sirve a nadie de fuera, y la dirección directamente no debe estar.
+TRASPASO.md

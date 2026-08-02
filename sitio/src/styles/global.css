@@ -1,0 +1,172 @@
+/* La identidad del taller, en la web: papel hueso, tinta azul, rojo Saorín y
+   ámbar. Las mismas cuatro tintas que usa la aplicación, para que quien llegue
+   aquí y luego la abra reconozca que es lo mismo. */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fuentes/SpaceGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fuentes/SpaceGrotesk-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fraunces';
+  src: url('/fuentes/Fraunces-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Caveat';
+  src: url('/fuentes/Caveat-Variable.woff2') format('woff2');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+:root {
+  --hueso: #f5f2ea;
+  --hueso-hondo: #ebe7db;
+  --tinta: #1d1b16;
+  --tinta-tenue: #6b665c;
+  --azul: #1a2f8f;
+  --rojo: #d93325;
+  --ambar: #f2c744;
+  --cuarto: #14100e;
+  --papel-borde: rgba(29, 27, 22, 0.14);
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--hueso);
+  color: var(--tinta);
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: 18px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  /* la textura del papel: dos degradados muy suaves, cero imágenes */
+  background-image:
+    radial-gradient(ellipse at 20% 0%, rgba(242, 199, 68, 0.07), transparent 55%),
+    radial-gradient(ellipse at 90% 100%, rgba(26, 47, 143, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+.envoltura { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+h1, h2, h3, .grot { font-family: 'Space Grotesk', system-ui, sans-serif; font-weight: 700; }
+.mano { font-family: 'Caveat', cursive; }
+
+a { color: var(--azul); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--rojo); }
+
+/* ── LA CABECERA ─────────────────────────────────────────────────────── */
+.cabecera {
+  position: sticky; top: 0; z-index: 40;
+  background: rgba(245, 242, 234, 0.88);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--papel-borde);
+}
+.cabecera .envoltura {
+  display: flex; align-items: center; gap: 22px;
+  height: 60px;
+}
+.marca { font-size: 17px; letter-spacing: -0.01em; }
+.marca .rojo { color: var(--rojo); }
+.cabecera nav { margin-left: auto; display: flex; gap: 22px; font-size: 15px; font-family: 'Space Grotesk', sans-serif; font-weight: 400; }
+.cabecera nav a { text-decoration: none; color: var(--tinta-tenue); }
+.cabecera nav a:hover { color: var(--rojo); }
+@media (max-width: 720px) { .cabecera nav a.opcional { display: none; } }
+
+/* ── EL TITULAR ──────────────────────────────────────────────────────── */
+.titular { padding: 74px 0 26px; }
+.titular h1 {
+  font-size: clamp(42px, 8vw, 86px);
+  line-height: 0.95;
+  margin: 0 0 6px;
+  letter-spacing: -0.03em;
+}
+.titular h1 .rojo { color: var(--rojo); }
+.reclamo {
+  font-size: clamp(21px, 3vw, 30px);
+  max-width: 21em;
+  margin: 18px 0 10px;
+  line-height: 1.3;
+}
+.entradilla { font-size: 19px; max-width: 34em; color: var(--tinta-tenue); }
+.botonera { display: flex; flex-wrap: wrap; gap: 12px; margin: 30px 0 8px; }
+.boton {
+  font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 15px;
+  padding: 13px 24px; border: 1.5px solid var(--tinta); border-radius: 2px;
+  text-decoration: none; color: var(--tinta); background: transparent;
+  transition: transform .12s ease, background .12s ease, color .12s ease;
+}
+.boton:hover { transform: translateY(-2px); }
+.boton.primario { background: var(--rojo); border-color: var(--rojo); color: #fff; }
+.boton.primario:hover { color: #fff; background: #c02a1d; }
+.pie-boton { font-size: 15px; color: var(--tinta-tenue); }
+
+/* ── SECCIONES ───────────────────────────────────────────────────────── */
+section { padding: 62px 0; }
+section.franja { background: var(--hueso-hondo); border-block: 1px solid var(--papel-borde); }
+section.oscura { background: var(--cuarto); color: #e8ded3; border-block: 1px solid #2a221d; }
+section.oscura h2, section.oscura h3 { color: #f0e5da; }
+section.oscura .rotulo { color: #b8724f; }
+section.oscura .apunte { color: #9d8a7c; }
+
+.rotulo {
+  font-family: 'Space Grotesk', sans-serif; font-weight: 700;
+  font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--rojo); margin-bottom: 12px;
+}
+h2 { font-size: clamp(28px, 4.4vw, 44px); line-height: 1.06; margin: 0 0 16px; letter-spacing: -0.02em; }
+.sumario { font-size: 20px; max-width: 36em; color: var(--tinta-tenue); margin: 0 0 34px; }
+section.oscura .sumario { color: #a99a8c; }
+.apunte { font-size: 15px; color: var(--tinta-tenue); }
+
+/* ── REJILLAS ────────────────────────────────────────────────────────── */
+.rejilla { display: grid; gap: 26px; }
+.rejilla.dos { grid-template-columns: repeat(2, 1fr); }
+.rejilla.tres { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 860px) { .rejilla.dos, .rejilla.tres { grid-template-columns: 1fr; } }
+
+.ficha { border-top: 2px solid var(--tinta); padding-top: 16px; }
+.ficha h3 { font-size: 19px; margin: 0 0 8px; }
+.ficha p { margin: 0; font-size: 16.5px; color: var(--tinta-tenue); }
+section.oscura .ficha { border-top-color: #4a3a30; }
+section.oscura .ficha p { color: #a2938a; }
+
+/* ── LAS CIFRAS ──────────────────────────────────────────────────────── */
+.cifras { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+@media (max-width: 860px) { .cifras { grid-template-columns: repeat(2, 1fr); } }
+.cifra .n {
+  font-family: 'Space Grotesk', sans-serif; font-weight: 700;
+  font-size: clamp(32px, 5vw, 48px); line-height: 1; color: var(--rojo);
+  letter-spacing: -0.03em;
+}
+.cifra .q { font-size: 15px; color: var(--tinta-tenue); margin-top: 8px; display: block; }
+
+/* ── LA CITA ─────────────────────────────────────────────────────────── */
+.cita {
+  font-size: clamp(22px, 3.4vw, 32px); line-height: 1.32;
+  border-left: 3px solid var(--rojo); padding-left: 26px; max-width: 24em;
+  margin: 0;
+}
+
+/* ── EL PIE ──────────────────────────────────────────────────────────── */
+footer { padding: 52px 0 70px; border-top: 1px solid var(--papel-borde); font-size: 15.5px; }
+footer .colofon { color: var(--tinta-tenue); max-width: 40em; }
+footer .colofon p { margin: 4px 0; }
+
+/* ── LA TABLA DE MEDIDAS ─────────────────────────────────────────────── */
+table.medidas { width: 100%; border-collapse: collapse; font-size: 16px; }
+table.medidas th, table.medidas td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--papel-borde); }
+table.medidas th { font-family: 'Space Grotesk', sans-serif; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--tinta-tenue); font-weight: 700; }
+table.medidas td.dato { font-family: 'Space Grotesk', sans-serif; font-weight: 700; color: var(--rojo); }
+table.medidas td.tenue { color: var(--tinta-tenue); }

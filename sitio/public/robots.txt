@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://laboratorios.joseluissaorin.com/sitemap.xml
