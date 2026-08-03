@@ -51,8 +51,11 @@ Por tanto:
   reutiliza `Clip` entero: encuadre, prefs, gelatinas, velocidad, mute. Se
   coloca LIBRE (con `start`), no en secuencia: una capa es un objeto puesto
   encima, no un eslabón.
-- `Proyecto.capas: Vec<Capa>` — el orden de la lista es el orden de apilado
-  (la última, encima). En pantalla es UN carril; el modelo admite N.
+- `Proyecto.capas: Vec<Capa>` con `pista: u8` — **el modelo de DaVinci**:
+  tres pistas de vídeo encima de la base (V2, V3, V4), cada una con sus
+  clips colocados libres, y la de arriba compone sobre la de abajo. El
+  apilado es (pista, orden); en la mesa sólo se dibujan las pistas usadas
+  más una libre — la pista aparece cuando la necesitas.
 - `Clip.anidada: Option<String>` — la clave de la bobina hija. La hija se
   carga en `Proyecto.subbobinas` al abrir (y al volver de editarla), con
   profundidad ≤ 3 y guarda de ciclos.
@@ -106,9 +109,10 @@ Por tanto:
 
 ## 7 · La interfaz (nativa/main.rs)
 
-- **el carril de la capa** encima de la tira de vídeo: tiras finas con
-  nombre y fundidos; arrastrar una lata o una foto de la estantería y
-  soltarla ahí crea la capa en ese segundo;
+- **las pistas V2–V4** encima de la tira, con su rótulo de carril: tiras
+  finas con nombre y fundidos; arrastrar una lata o una foto y soltarla en
+  un carril crea el clip AHÍ, y arrastrar un clip a otro carril lo cambia
+  de pista, como en DaVinci;
 - mover (arrastre), recortar y ESTIRAR por los bordes (mismo trato que la
   música), ⌫ o papelera para quitar, clic para elegir;
 - la ficha de la capa: fundidos que se ciclan, silencio, quitar, y la
@@ -162,10 +166,12 @@ Por tanto:
   mismo fotograma — mirado, no supuesto
 - ✅ **la preview**: compone las capas en vivo (RGBA y vídeo), y la anidada
   proyecta el clip hijo con el encuadre exterior
-- ✅ **la interfaz**: carril de capas con fundidos, soltar una lata o una
-  foto lo crea, mover/recortar/estirar, ⌫, ficha con fundidos y encuadre a
-  cero, alt-arrastre coloca el PiP, «Insertar otra bobina…», el clip anidado
-  con marco doble y las miniaturas de su hija, deshacer con capas
+- ✅ **la interfaz**: pistas V2–V4 apiladas con sus rótulos (visto con un
+  PiP en V2 y un rótulo en V3 componiendo A LA VEZ sobre una anidada),
+  soltar una lata en un carril crea el clip ahí, arrastrar entre carriles
+  cambia de pista, mover/recortar/estirar, ⌫, ficha con pista y fundidos,
+  alt-arrastre coloca el PiP, «Insertar otra bobina…», el clip anidado con
+  marco doble y las miniaturas de su hija, deshacer con capas
 - ⧗ **winlab**: los carriles C y D, el RGBA residente y el búfer por carril
   están escritos; **el GPD está apagado** y no se ha podido compilar ni ver.
   Nada de esta tanda está en Windows todavía.

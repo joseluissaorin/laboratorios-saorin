@@ -1158,6 +1158,12 @@ impl ApplicationHandler for App {
                         }
                     }
                     Arrastre::CapaMueve(i) => {
+                        // arrastrarla a otro carril LA CAMBIA DE PISTA
+                        if let Some(p) = e.pista_capa_en(e.raton.1) {
+                            if let Some(cp) = self.proyecto.capas.get_mut(i) {
+                                cp.pista = p;
+                            }
+                        }
                         let d = (dx / e.pxs) as f64;
                         let radio = 10.0 / e.pxs as f64;
                         let iman = prefs::IMAN.load(std::sync::atomic::Ordering::Relaxed);
@@ -6206,19 +6212,42 @@ impl Estado {
         self.tira_y() + 88.0 + 14.0 + k as f32 * Self::ALTO_PISTA
     }
 
-    /// EL CARRIL DE LA CAPA (CAPAS §7): la franja fina encima de la tira de
-    /// vídeo. La misma geometría para dibujar y para tocar.
-    fn capa_y(&self) -> f32 { self.tira_y() - 30.0 }
+    /// EL ALTO de cada pista de capa en pantalla
+    const ALTO_CAPA: f32 = 24.0;
 
-    /// la capa bajo el ratón, si la hay (la de encima gana)
+    /// CUÁNTAS PISTAS DE CAPA SE VEN: las que tienen material más una libre
+    /// para soltar encima — el gesto de DaVinci de «la pista aparece cuando
+    /// la necesitas», sin robarle mesa a quien no usa capas.
+    fn pistas_capa_visibles(&self, pr: &Proyecto) -> usize {
+        let usadas = pr.capas.iter().map(|c| c.pista as usize + 1).max().unwrap_or(0);
+        (usadas + 1).min(proyecto::PISTAS_CAPA)
+    }
+
+    /// la Y del carril de la pista `p` (0 = V2, la más pegada al vídeo). Las
+    /// pistas SUBEN: V2 justo encima de la tira, V3 encima de V2…
+    fn capa_pista_y(&self, p: u8) -> f32 {
+        self.tira_y() - 8.0 - Self::ALTO_CAPA * (p as f32 + 1.0)
+    }
+
+    /// qué pista de capa hay bajo una y de pantalla
+    fn pista_capa_en(&self, my: f32) -> Option<u8> {
+        for p in 0..proyecto::PISTAS_CAPA as u8 {
+            let y = self.capa_pista_y(p);
+            if my >= y - 2.0 && my <= y + Self::ALTO_CAPA - 4.0 { return Some(p); }
+        }
+        None
+    }
+
+    /// la capa bajo el ratón, si la hay (dentro de su pista; la última gana)
     fn capa_en_punto(&self, pr: &Proyecto, mx: f32, my: f32) -> Option<usize> {
-        let cy = self.capa_y();
-        if my < cy - 2.0 || my > cy + 22.0 { return None }
+        let p = self.pista_capa_en(my)?;
         (0..pr.capas.len()).rev().find(|&k| {
             let cp = &pr.capas[k];
-            let x0 = self.x_de(cp.start);
-            let x1 = self.x_de(cp.fin());
-            mx >= x0 && mx <= x1
+            cp.pista == p && {
+                let x0 = self.x_de(cp.start);
+                let x1 = self.x_de(cp.fin());
+                mx >= x0 && mx <= x1
+            }
         })
     }
 
@@ -6660,7 +6689,10 @@ impl Estado {
             "prefs": pr.clips.first().map(|c| c.prefs.clone()).unwrap_or(pr.prefs.clone()),
         });
         // ── LAS CAPAS (CAPAS §3): el carril de encima, recortado al rango ──
-        let capas_payload: Vec<serde_json::Value> = pr.capas.iter().filter_map(|cp| {
+        let mut orden_capas: Vec<usize> = (0..pr.capas.len()).collect();
+        orden_capas.sort_by_key(|&k| (pr.capas[k].pista, k));
+        let capas_payload: Vec<serde_json::Value> = orden_capas.into_iter()
+            .map(|k| &pr.capas[k]).filter_map(|cp| {
             let (ini, fin) = (cp.start, cp.fin());
             if solo_tramo && (fin <= ra + 1e-6 || ini >= rb - 1e-6) { return None; }
             let (mut c_in, mut c_out, mut st) = (cp.c.t_in, cp.c.t_out, ini);
@@ -6918,7 +6950,7 @@ impl Estado {
             // ── SOLTARLA EN EL CARRIL DE LA CAPA = una capa nueva ────────
             // Vale un vídeo (PiP) o una foto/rótulo (con su alfa). El carril
             // es la franja fina encima de la tira.
-            if c.fps >= 0.0 && (my - self.capa_y()).abs() <= 14.0 && mx > Self::ESTANTE_W {
+            if c.fps >= 0.0 && self.pista_capa_en(my).is_some() && mx > Self::ESTANTE_W {
                 self.recuerda(pr);
                 let start = self.tiempo_en(mx).max(0.0);
                 let mut clip = pr.clip_de(&c);
@@ -6929,8 +6961,10 @@ impl Estado {
                     clip.lut_in = None;
                     clip.lut_color = None;
                 }
+                // a la pista que haya bajo el ratón (V2 si no acierta)
+                let pista = self.pista_capa_en(my).unwrap_or(0);
                 pr.capas.push(proyecto::Capa {
-                    c: clip, start, fundido_in: 0.0, fundido_out: 0.0,
+                    c: clip, start, pista, fundido_in: 0.0, fundido_out: 0.0,
                 });
                 let _ = pr.guarda();
                 self.sel_capa = Some(pr.capas.len() - 1);
@@ -8453,7 +8487,9 @@ impl Estado {
                 fila(&mut d, y, "del original", &format!("{:.2} → {:.2}",
                                                          cp.c.t_in, cp.c.t_out)); y += 16.0;
                 fila(&mut d, y, "qué es", if crate::foto::es_foto(&cp.c.ruta) {
-                    "foto o rótulo (con su alfa)" } else { "vídeo (PiP)" }); y += 20.0;
+                    "foto o rótulo (con su alfa)" } else { "vídeo (PiP)" }); y += 16.0;
+                fila(&mut d, y, "pista", match cp.pista { 0 => "V2", 1 => "V3", _ => "V4" });
+                y += 20.0;
                 let _ = y;
                 let (y1b, _) = Self::musica_botones_y();
                 let bot = |d: &mut ui::Dibujo, x: f32, y: f32, t: &str, on: bool| {
@@ -9174,9 +9210,25 @@ impl Estado {
         // Tiras finas encima de la tira de vídeo: se ve QUÉ hay encima y
         // CUÁNDO. La elegida, en rojo; los fundidos, como cuñas.
         {
-            let cy = self.capa_y();
+            // LAS PISTAS DE VÍDEO (V2..V4), como en cualquier editor: carriles
+            // apilados encima de la tira, cada uno con sus clips; el de
+            // arriba compone sobre el de abajo. Sólo se dibujan las usadas
+            // más una libre — la pista aparece cuando la necesitas.
+            let visibles = self.pistas_capa_visibles(pr);
+            for p in 0..visibles as u8 {
+                let cy = self.capa_pista_y(p);
+                // el rótulo del carril y su raya de suelo
+                d2.texto(Self::ESTANTE_W + 4.0, cy + 6.0,
+                         match p { 0 => "V2", 1 => "V3", _ => "V4" }, 7.5,
+                         paleta::TINTA_TENUE);
+                trazo::linea(&mut d2, Self::ESTANTE_W + 24.0, cy + Self::ALTO_CAPA - 5.0,
+                             ancho - 8.0, cy + Self::ALTO_CAPA - 5.0, 1.0,
+                             [0.2, 0.18, 0.15, 0.16], 1440 + p as u32);
+            }
             for (k, cp) in pr.capas.iter().enumerate() {
-                let x0 = self.x_de(cp.start).max(Self::ESTANTE_W);
+                if cp.pista as usize >= visibles { continue }
+                let cy = self.capa_pista_y(cp.pista);
+                let x0 = self.x_de(cp.start).max(Self::ESTANTE_W + 24.0);
                 let x1 = self.x_de(cp.fin()).min(ancho);
                 if x1 <= x0 { continue }
                 let elegida = self.sel_capa == Some(k);
@@ -9185,28 +9237,25 @@ impl Estado {
                 } else {
                     [0.42, 0.55, 0.78, 0.85]        // azulado: vídeo (PiP)
                 };
-                d2.rect(x0, cy, x1 - x0, 20.0, fondo);
+                d2.rect(x0, cy, x1 - x0, 18.0, fondo);
                 if elegida {
-                    trazo::caja(&mut d2, x0, cy, x1 - x0, 20.0, 1.8, paleta::ROJO, 1450);
+                    trazo::caja(&mut d2, x0, cy, x1 - x0, 18.0, 1.8, paleta::ROJO, 1450);
                 } else {
-                    trazo::caja(&mut d2, x0, cy, x1 - x0, 20.0, 1.0,
+                    trazo::caja(&mut d2, x0, cy, x1 - x0, 18.0, 1.0,
                                 [0.2, 0.18, 0.15, 0.8], 1450 + k as u32);
                 }
                 // las cuñas de los fundidos
                 if cp.fundido_in > 0.01 {
                     let fw = (cp.fundido_in as f32 * self.pxs).min(x1 - x0);
-                    d2.rect(x0, cy, fw, 20.0, [1.0, 1.0, 1.0, 0.25]);
+                    d2.rect(x0, cy, fw, 18.0, [1.0, 1.0, 1.0, 0.25]);
                 }
                 if cp.fundido_out > 0.01 {
                     let fw = (cp.fundido_out as f32 * self.pxs).min(x1 - x0);
-                    d2.rect(x1 - fw, cy, fw, 20.0, [1.0, 1.0, 1.0, 0.25]);
+                    d2.rect(x1 - fw, cy, fw, 18.0, [1.0, 1.0, 1.0, 0.25]);
                 }
                 let n: String = cp.c.media.chars().take(((x1 - x0 - 8.0) / 6.0)
                                                         .max(0.0) as usize).collect();
-                d2.texto(x0 + 4.0, cy + 5.0, &n, 8.0, [0.1, 0.09, 0.08, 1.0]);
-            }
-            if !pr.capas.is_empty() {
-                d2.texto(Self::ESTANTE_W + 4.0, cy + 5.0, "", 8.0, paleta::TINTA_TENUE);
+                d2.texto(x0 + 4.0, cy + 4.0, &n, 8.0, [0.1, 0.09, 0.08, 1.0]);
             }
         }
         // LA CUCHILLA SE DIBUJA DONDE VA A MORDER. Con una música elegida

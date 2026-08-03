@@ -118,11 +118,19 @@ impl ClipAudio {
 /// UNA CAPA (CAPAS §2): un clip COLOCADO encima de la bobina, no un eslabón
 /// de ella. Reutiliza `Clip` entero —encuadre, receta, gelatinas, velocidad,
 /// silencio— y añade lo que una capa necesita: dónde entra y sus fundidos.
+/// cuántas pistas de vídeo hay ENCIMA de la base (V2, V3 y V4; V1 es la
+/// bobina). El modelo de composición admite dos capas VISIBLES a la vez en
+/// un fotograma (las dos de más arriba); las pistas son las de DaVinci: cada
+/// una con sus clips, la de arriba tapa a la de abajo.
+pub const PISTAS_CAPA: usize = 3;
+
 #[derive(Clone)]
 pub struct Capa {
     pub c: Clip,
     /// en qué segundo de la bobina entra
     pub start: f64,
+    /// EN QUÉ PISTA va (0 = V2, 1 = V3, 2 = V4): manda en el apilado
+    pub pista: u8,
     /// fundidos de ALFA de la propia capa (no a negro: a transparente)
     pub fundido_in: f64,
     pub fundido_out: f64,
@@ -651,6 +659,7 @@ pub fn payload_de_sub(sb: &SubBobina) -> serde_json::Value {
         "clips2": sb.capas.iter().map(|cp| {
             let mut o = clip_json(&cp.c);
             o["start"] = serde_json::json!(cp.start);
+            o["pista"] = serde_json::json!(cp.pista);
             if cp.fundido_in > 0.001 { o["fadeIn"] = serde_json::json!(cp.fundido_in); }
             if cp.fundido_out > 0.001 { o["fadeOut"] = serde_json::json!(cp.fundido_out); }
             o
@@ -685,6 +694,8 @@ fn carga_sub(base: &Path, clave: &str, dir_in: &Path, dir_col: &Path)
         .map(|(c, j)| Capa {
             c,
             start: j["start"].as_f64().unwrap_or(0.0).max(0.0),
+            pista: j["pista"].as_u64().unwrap_or(0)
+                .min(PISTAS_CAPA as u64 - 1) as u8,
             fundido_in: j["fadeIn"].as_f64().unwrap_or(0.0).max(0.0),
             fundido_out: j["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
         }).collect();
@@ -1093,7 +1104,7 @@ impl Proyecto {
             let c = &cp.c;
             let mut o = serde_json::json!({
                 "media": c.media, "in": c.t_in, "out": c.t_out,
-                "start": cp.start,
+                "start": cp.start, "pista": cp.pista,
             });
             if cp.fundido_in > 0.001 { o["fadeIn"] = serde_json::json!(cp.fundido_in); }
             if cp.fundido_out > 0.001 { o["fadeOut"] = serde_json::json!(cp.fundido_out); }
@@ -1174,6 +1185,8 @@ impl Proyecto {
             .map(|(c, j)| Capa {
                 c,
                 start: j["start"].as_f64().unwrap_or(0.0).max(0.0),
+                pista: j["pista"].as_u64().unwrap_or(0)
+                    .min(PISTAS_CAPA as u64 - 1) as u8,
                 fundido_in: j["fadeIn"].as_f64().unwrap_or(0.0).max(0.0),
                 fundido_out: j["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
             }).collect();
@@ -1322,9 +1335,20 @@ impl Proyecto {
     /// LAS CAPAS VISIBLES en el segundo `t`: hasta dos, de abajo arriba, con
     /// su tiempo de fuente y su alfa (CAPAS §3)
     pub fn capas_en(&self, t: f64) -> Vec<(usize, f64, f32)> {
-        let mut v: Vec<(usize, f64, f32)> = self.capas.iter().enumerate()
-            .filter(|(_, cp)| t >= cp.start - 1e-9 && t < cp.fin() - 1e-9)
-            .map(|(k, cp)| (k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t)))
+        // EL APILADO ES POR PISTA (V2 < V3 < V4), como en cualquier editor:
+        // a igual pista, la última colocada gana
+        let mut idx: Vec<usize> = (0..self.capas.len())
+            .filter(|&k| {
+                let cp = &self.capas[k];
+                t >= cp.start - 1e-9 && t < cp.fin() - 1e-9
+            })
+            .collect();
+        idx.sort_by_key(|&k| (self.capas[k].pista, k));
+        let mut v: Vec<(usize, f64, f32)> = idx.into_iter()
+            .map(|k| {
+                let cp = &self.capas[k];
+                (k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t))
+            })
             .collect();
         let n = v.len();
         if n > 2 { v.drain(..n - 2); }
