@@ -30,6 +30,7 @@ mod titulo;
 mod miniaturas;
 mod ondas;
 mod proyecto;
+mod ritmo;
 mod sonido;
 mod trazo;
 mod ui;
@@ -297,7 +298,7 @@ struct Estado {
     historia: Vec<Paso>,
     futuro: Vec<Paso>,
     gesto_previo: Option<(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>,
-                          Vec<proyecto::Capa>)>,
+                          Vec<proyecto::Capa>, Vec<proyecto::Marca>)>,
     /// el último paso anotado está esperando su rótulo: el primer aviso que
     /// llegue lo bautiza (§4bis.7 — deshacer a ciegas)
     espera_rotulo: bool,
@@ -309,6 +310,8 @@ struct Estado {
     hover_lata: Option<(usize, std::time::Instant)>,
     visor: visor::Visor,
     banco_h: f32,
+    /// el compás de cada cinta, medido una vez (ritmo.rs)
+    compases: std::collections::HashMap<String, ritmo::Compas>,
     /// cuánto ha crecido el banco por las pistas de capa visibles (px)
     extra_capas: f32,
     /// carriles de música visibles (los usados más uno libre; mínimo 3)
@@ -439,6 +442,7 @@ struct Paso {
     clips: Vec<proyecto::Clip>,
     audio: Vec<proyecto::ClipAudio>,
     capas: Vec<proyecto::Capa>,
+    marcas: Vec<proyecto::Marca>,
     que: String,
 }
 
@@ -770,6 +774,7 @@ impl ApplicationHandler for App {
             hover_lata: None,
             visor,
             banco_h: 250.0,
+            compases: std::collections::HashMap::new(),
             extra_capas: 0.0,
             musica_vis: 3,
             raton: (0.0, 0.0),
@@ -2874,8 +2879,9 @@ impl Estado {
     // ══════════ historial: no existe acción sin deshacer (80 pasos) ═══
 
     fn bobinas_iguales(a: &(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>,
-                            Vec<proyecto::Capa>),
+                            Vec<proyecto::Capa>, Vec<proyecto::Marca>),
                        pr: &Proyecto) -> bool {
+        if a.3 != pr.marcas { return false; }
         // las capas también cuentan como cambio
         if a.2.len() != pr.capas.len()
             || !a.2.iter().zip(&pr.capas).all(|(x, y)| {
@@ -2904,7 +2910,8 @@ impl Estado {
     /// anota el estado ANTES de una mutación puntual (corte, quitar, añadir)
     fn recuerda(&mut self, pr: &Proyecto) {
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                  capas: pr.capas.clone(), que: String::new() });
+                                  capas: pr.capas.clone(), marcas: pr.marcas.clone(),
+                                  que: String::new() });
         if self.historia.len() > 80 { self.historia.remove(0); }
         self.futuro.clear();
         self.espera_rotulo = true;
@@ -2914,7 +2921,7 @@ impl Estado {
     /// al empezar un gesto de arrastre: foto del estado
     fn abre_gesto(&mut self, pr: &Proyecto) {
         self.gesto_previo = Some((pr.clips.clone(), pr.audio.clone(),
-                                  pr.capas.clone()));
+                                  pr.capas.clone(), pr.marcas.clone()));
     }
 
     /// al soltar: si el gesto cambió algo, UN paso de historial
@@ -2922,7 +2929,8 @@ impl Estado {
         if let Some(prev) = self.gesto_previo.take() {
             if !Self::bobinas_iguales(&prev, pr) {
                 self.historia.push(Paso { clips: prev.0, audio: prev.1,
-                                          capas: prev.2, que: String::new() });
+                                          capas: prev.2, marcas: prev.3,
+                                          que: String::new() });
                 if self.historia.len() > 80 { self.historia.remove(0); }
                 self.futuro.clear();
                 self.espera_rotulo = true;
@@ -2998,9 +3006,11 @@ impl Estado {
             A::Congelar => self.congela(pr),
             A::Desacopla => self.desacopla(pr),
             A::InsertaBobina => self.inserta_bobina(pr),
+            A::MarcasCompas => self.marcas_al_compas(pr),
             A::MarcaAqui => {
                 let t = pr.fps.max(1.0);
                 let t = (self.visor.t * t).round() / t;
+                self.recuerda(pr);
                 if let Some(k) = pr.marcas.iter().position(|m| (m.t - t).abs() < 0.15) {
                     pr.marcas.remove(k);
                     self.di("marca quitada");
@@ -3399,10 +3409,12 @@ impl Estado {
         let rotulo = if prev.que.is_empty() { "el último gesto".to_string() }
                      else { prev.que.clone() };
         self.futuro.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                capas: pr.capas.clone(), que: prev.que });
+                                capas: pr.capas.clone(), marcas: pr.marcas.clone(),
+                                que: prev.que });
         pr.clips = prev.clips;
         pr.audio = prev.audio;
         pr.capas = prev.capas;
+        pr.marcas = prev.marcas;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -3415,10 +3427,12 @@ impl Estado {
         let rotulo = if sig.que.is_empty() { "el último gesto".to_string() }
                      else { sig.que.clone() };
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                  capas: pr.capas.clone(), que: sig.que });
+                                  capas: pr.capas.clone(), marcas: pr.marcas.clone(),
+                                  que: sig.que });
         pr.clips = sig.clips;
         pr.audio = sig.audio;
         pr.capas = sig.capas;
+        pr.marcas = sig.marcas;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -5552,6 +5566,85 @@ impl Estado {
     /// distintos no obliguen a estar subiendo y bajando el mando. Se mide el
     /// pico real de la onda que el taller ya tiene dibujada —no hay que
     /// decodificar nada otra vez— y se pone la ganancia que lo deja en −3 dB.
+    /// SIEMBRA LA BOBINA DE MARCAS AL COMPÁS de la música (ritmo.rs): cada
+    /// golpe, una marca ♩ — y como las marcas son imanes, la cuchilla y los
+    /// bordes se pegan al pulso solos. Con una música elegida, sólo la suya;
+    /// si no, el de todas las cintas de la bobina.
+    fn marcas_al_compas(&mut self, pr: &mut Proyecto) {
+        let objetivos: Vec<usize> = match self.sel_audio {
+            Some(ia) if ia < pr.audio.len() => vec![ia],
+            _ => (0..pr.audio.len()).collect(),
+        };
+        if objetivos.is_empty() {
+            self.di("no hay música a la que buscarle el pulso");
+            return;
+        }
+        // medir lo que falte (una vez por cinta; el análisis tarda menos que
+        // abrir el fichero, pero no es gratis)
+        for &ia in &objetivos {
+            let (media, ruta) = (pr.audio[ia].media.clone(), pr.audio[ia].ruta.clone());
+            if !self.compases.contains_key(&media) {
+                if let Some(c) = ritmo::analiza(&ruta) {
+                    self.compases.insert(media, c);
+                }
+            }
+        }
+        let mut nuevas: Vec<f64> = Vec::new();
+        let mut bpm = 0.0f64;
+        let mut sordas: Vec<String> = Vec::new();
+        for &ia in &objetivos {
+            let au = &pr.audio[ia];
+            let Some(c) = self.compases.get(&au.media) else {
+                sordas.push(au.media.clone());
+                continue;
+            };
+            bpm = c.bpm;
+            for &g in &c.golpes {
+                if g >= au.t_in - 1e-6 && g <= au.t_out + 1e-6 {
+                    let t = au.entra() + (g - au.t_in);
+                    if t >= 0.0 && t <= pr.duracion() + 0.25 {
+                        nuevas.push(t);
+                    }
+                }
+            }
+        }
+        if nuevas.is_empty() {
+            self.di(if sordas.is_empty() { "el pulso cae fuera del trozo usado" }
+                    else { "a esa música no le encuentro el pulso" });
+            return;
+        }
+        self.recuerda(pr);
+        pr.marcas.retain(|m| m.nota != "♩");
+        nuevas.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        nuevas.dedup_by(|x, y| (*x - *y).abs() < 0.04);
+        let cuantas = nuevas.len();
+        for t in nuevas {
+            pr.marcas.push(proyecto::Marca { t, nota: "♩".into(), color: 2 });
+        }
+        pr.marcas.sort_by(|x, y| x.t.partial_cmp(&y.t).unwrap_or(std::cmp::Ordering::Equal));
+        let _ = pr.guarda();
+        self.visor.foley(sonido::Foley::Tick);
+        if sordas.is_empty() {
+            self.di(&format!("el compás sembrado: {cuantas} marcas a {bpm:.0} BPM"));
+        } else {
+            self.di(&format!("{cuantas} marcas a {bpm:.0} BPM (sin pulso: {})",
+                             sordas.join(", ")));
+        }
+    }
+
+    /// quita TODAS las marcas de compás (las ♩); las del autor se quedan
+    fn compas_fuera(&mut self, pr: &mut Proyecto) {
+        let cuantas = pr.marcas.iter().filter(|m| m.nota == "♩").count();
+        if cuantas == 0 {
+            self.di("no hay marcas de compás puestas");
+            return;
+        }
+        self.recuerda(pr);
+        pr.marcas.retain(|m| m.nota != "♩");
+        let _ = pr.guarda();
+        self.di(&format!("fuera las {cuantas} marcas de compás"));
+    }
+
     fn normaliza_musica(&mut self, pr: &mut Proyecto, ia: usize) {
         let Some(a) = pr.audio.get(ia) else { return };
         let (media, ruta) = (a.media.clone(), a.ruta.clone());
@@ -7093,6 +7186,8 @@ impl Estado {
     /// la tercera fila: los fundidos, que en la ficha del CLIP se ciclan con
     /// un clic y aquí no existían
     fn musica_fila3_y() -> f32 { Self::CABECERA + 261.0 }
+    /// la cuarta: el compás (marcas al ritmo, y quitarlas)
+    fn musica_fila4_y() -> f32 { Self::CABECERA + 285.0 }
 
     /// clics del panel derecho, el banco y el vidrio
     fn pulsa_ficha(&mut self, pr: &mut Proyecto) {
@@ -7194,6 +7289,12 @@ impl Estado {
                         let _ = pr.guarda();
                         self.di(&format!("al carril {}", pr.audio[ia].pista + 1));
                     }
+                    return;
+                }
+                // la fila del compás: sembrar las marcas ♩ o quitarlas
+                if let Some(k) = cual(Self::musica_fila4_y()) {
+                    if k == 0 { self.marcas_al_compas(pr); }
+                    else { self.compas_fuera(pr); }
                     return;
                 }
                 // el mando del volumen de la pista
@@ -8598,11 +8699,16 @@ impl Estado {
                 let y3 = Self::musica_fila3_y();
                 bot(&mut d, fx + 4.0, y3, &format!("entra {:.1}s", a.fade_in), a.fade_in > 0.01);
                 bot(&mut d, fx + 84.0, y3, &format!("sale {:.1}s", a.fade_out), a.fade_out > 0.01);
-                d.texto(fx + 4.0, y3 + 26.0, "arrastra la cinta para moverla", 8.0,
+                // EL COMPÁS: marcas al ritmo de esta cinta (imanes al pulso)
+                let y4 = Self::musica_fila4_y();
+                let con_compas = pr.marcas.iter().any(|m| m.nota == "♩");
+                bot(&mut d, fx + 4.0, y4, "al compás ♩", con_compas);
+                bot(&mut d, fx + 84.0, y4, "compás fuera", false);
+                d.texto(fx + 4.0, y4 + 26.0, "arrastra la cinta para moverla", 8.0,
                         paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, y3 + 37.0, "los bordes RECORTAN Y ESTIRAN · B corta",
+                d.texto(fx + 4.0, y4 + 37.0, "los bordes RECORTAN Y ESTIRAN · B corta",
                         8.0, paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, y3 + 48.0, "los puntos de volumen, sin modificador",
+                d.texto(fx + 4.0, y4 + 48.0, "los puntos de volumen, sin modificador",
                         8.0, paleta::TINTA_TENUE);
             }
         }
@@ -9363,6 +9469,17 @@ impl Estado {
         for (mk, m) in pr.marcas.iter().enumerate() {
             let mx2 = self.x_de(m.t);
             if mx2 > Self::ESTANTE_W && mx2 < ancho {
+                // LOS GOLPES DEL COMPÁS (♩) van a palitos de metrónomo, no a
+                // chinchetas: puede haber trescientos y una pared de
+                // chinchetas taparía la mesa. De lejos ni se dibujan (los
+                // imanes siguen ahí); de cerca, una empalizada fina.
+                if m.nota == "♩" {
+                    if self.pxs > 4.0 {
+                        d2.rect(mx2 - 0.7, ty - 22.0, 1.4, 12.0,
+                                [0.906, 0.639, 0.129, 0.85]);
+                    }
+                    continue;
+                }
                 // EL COLOR es de la marca, no de su sitio en la lista: la
                 // chincheta amarilla siempre quiere decir lo mismo (§4bis.1)
                 let ch = [doodles::CHINCHETA_AMBAR, doodles::CHINCHETA_TINTA,
@@ -9800,8 +9917,18 @@ fn app_base(p: &Proyecto) -> std::path::PathBuf { p.base.clone() }
 
 #[cfg(test)]
 mod pruebas_baldas {
+    /// necesita un taller de verdad en /tmp/taller (cuatro cintas o más).
+    /// Si no está —el reinicio nocturno barre /tmp— se lo salta DICIÉNDOLO,
+    /// que un rojo por un fixture ausente es ruido, no información.
     #[test]
     fn estanteria_lee_baldas() {
+        let cuantos = std::fs::read_dir("/tmp/taller/media")
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        if cuantos < 4 {
+            eprintln!("sin taller de pruebas en /tmp/taller/media ({cuantos} ficheros) — me lo salto");
+            return;
+        }
         std::env::set_var("FL_MEDIA", "/tmp/taller/media");
         let pr = crate::proyecto::Proyecto::cargar().unwrap();
         let est = pr.estanteria();

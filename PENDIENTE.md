@@ -106,6 +106,23 @@ trabaja, sin binario no.
 
 # Segunda tanda (2-ago-2026)
 
+> **De propina (3-ago): EL COMPÁS.** «Marcas al ritmo de la música»: un
+> detector de pulso propio (`ritmo.rs` — flujo espectral + autocorrelación
+> con prior + programación dinámica de Ellis, con FFT de casa y symphonia;
+> cero dependencias nuevas) siembra la bobina de marcas ♩ en cada golpe.
+> Como las marcas son imanes, la cuchilla y los bordes se pegan al pulso
+> solos. En la ficha de la música («al compás ♩» / «compás fuera», idempotente
+> y con caché por cinta) y en el menú (con una música elegida, la suya; si
+> no, todas). Los golpes se dibujan como palitos de metrónomo, no chinchetas
+> —trescientas chinchetas serían una pared— y de lejos ni se pintan. A lo
+> que no tiene pulso (habla, rubato, ruido) se le DICE «sin pulso», no se le
+> inventa: la guarda es la autocorrelación de Pearson sin rectificar (medido:
+> ruido 0.014, metrónomo 0.955; el Concerto in F de Gershwin, con razón,
+> 0.07 → fuera). Verificado con tests de señal fabricada (120 clavado, 84 no
+> se dobla) y con música CC0 real; y de paso symphonia gana mp3/wav/flac,
+> que la estantería ya aceptaba sin poder decodificarlos. Las MARCAS entran
+> en el historial: ⌘Z también las deshace.
+
 ## §7 · EL EDITOR
 
 ✅ **El dibujo del volumen se altera al recortar.** Los puntos de la banda se
