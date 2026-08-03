@@ -23,7 +23,7 @@ pub enum Accion {
     Mesa, CuartoOscuro, Revelado, PantallaCompleta, Lupa, Iman,
     Chuleta, Ajustes, Acerca,
     /// lo que faltaba en la barra y solo vivía en una tecla
-    Encuadre, Congelar, Desacopla, MarcaAqui, RangoEntrada, RangoSalida, RangoQuitar, Bucle,
+    Encuadre, Congelar, Desacopla, InsertaBobina, MarcaAqui, RangoEntrada, RangoSalida, RangoQuitar, Bucle,
     VentanaAjustes, VentanaChuleta, VentanaVigia, VentanaBobinas,
 }
 
@@ -54,6 +54,7 @@ pub const MENUS: &[Persiana] = &[
         SEP,
         e("Importar material…",   "I",  Accion::Importar),
         e("Importar una carpeta…", "",  Accion::ImportarCarpeta),
+        e("Insertar otra bobina…", "",  Accion::InsertaBobina),
         SEP,
         e("Revelar la bobina",    "⌘R", Accion::Revelar),
         e("Dónde va el máster…",  "",   Accion::DondeVa),

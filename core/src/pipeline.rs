@@ -100,6 +100,29 @@ pub fn make_pass(
     Pass { pipeline, layout }
 }
 
+/// el mismo destino, con MEZCLA POR ALFA (CAPAS §6): lo que necesita el pase
+/// de una capa para componer sobre lo ya revelado en vez de sustituirlo
+pub fn color_target_blend(format: wgpu::TextureFormat) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            // el alfa del destino se queda opaco: el lienzo de la preview no
+            // se compone con nada más
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+        }),
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
 pub fn tex_filter_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,

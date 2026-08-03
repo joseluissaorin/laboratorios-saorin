@@ -264,6 +264,8 @@ struct Estado {
     /// no se podía elegir, ni ver su ficha, ni borrarla — solo añadirla y
     /// arrastrarla a ciegas.
     sel_audio: Option<usize>,
+    /// la capa elegida (CAPAS §7): manda sobre la ficha y sobre la cuchilla
+    sel_capa: Option<usize>,
     /// el diálogo de revelado: Some(preset elegido 0..4)
     revelar: Option<usize>,
     /// el diálogo de TÍTULO: el texto en edición
@@ -294,7 +296,8 @@ struct Estado {
     /// (fotografía de la bobina ENTERA: clips + pista de música)
     historia: Vec<Paso>,
     futuro: Vec<Paso>,
-    gesto_previo: Option<(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>)>,
+    gesto_previo: Option<(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>,
+                          Vec<proyecto::Capa>)>,
     /// el último paso anotado está esperando su rótulo: el primer aviso que
     /// llegue lo bautiza (§4bis.7 — deshacer a ciegas)
     espera_rotulo: bool,
@@ -431,6 +434,7 @@ struct Estado {
 struct Paso {
     clips: Vec<proyecto::Clip>,
     audio: Vec<proyecto::ClipAudio>,
+    capas: Vec<proyecto::Capa>,
     que: String,
 }
 
@@ -452,6 +456,12 @@ enum Arrastre {
     Rango(u8),
     /// el mismo rango, pero desde la regla de la sala de revelado
     RangoSala(u8),
+    /// la capa: mover y recortar (CAPAS §7)
+    CapaMueve(usize),
+    CapaTrimI(usize),
+    CapaTrimD(usize),
+    /// colocar el PiP: alt-arrastre en el visor con una capa elegida
+    CapaEncuadre(usize),
     Manivela, Barra, Caja,
 }
 
@@ -730,6 +740,7 @@ impl ApplicationHandler for App {
             nueva: None,
             chuleta: false,
             sel_audio: None,
+            sel_capa: None,
             ajustes: false,
             revelar: None,
             titulando: None,
@@ -1144,6 +1155,52 @@ impl ApplicationHandler for App {
                                 // 24 px de pista ≈ 30 dB de recorrido
                                 p.1 = (p.1 - dy as f64 * 30.0 / 24.0).clamp(-24.0, 6.0);
                             }
+                        }
+                    }
+                    Arrastre::CapaMueve(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        let radio = 10.0 / e.pxs as f64;
+                        let iman = prefs::IMAN.load(std::sync::atomic::Ordering::Relaxed);
+                        let puntos = if iman { self.proyecto.imanes() } else { Vec::new() };
+                        if let Some(cp) = self.proyecto.capas.get_mut(i) {
+                            let mut nuevo = (cp.start + d).max(0.0);
+                            if iman {
+                                let dur = cp.dur();
+                                let mut cand: Vec<f64> = Vec::with_capacity(puntos.len() * 2);
+                                for x in &puntos { cand.push(*x); cand.push(x - dur); }
+                                cand.retain(|c| *c >= -0.001 && (c - nuevo).abs() <= radio);
+                                if let Some(x) = cand.into_iter().min_by(|p, q| {
+                                    (p - nuevo).abs().partial_cmp(&(q - nuevo).abs())
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                }) { nuevo = x.max(0.0); }
+                            }
+                            cp.start = nuevo;
+                        }
+                    }
+                    Arrastre::CapaEncuadre(k) => {
+                        let [_, _, gw, gh] = e.visor.rect_pantalla;
+                        let dy2 = e.raton.1 - ant.1;
+                        if let Some(cp) = self.proyecto.capas.get_mut(k) {
+                            cp.c.enc.pos.0 += dx / gw.max(1.0);
+                            cp.c.enc.pos.1 += dy2 / gh.max(1.0);
+                        }
+                    }
+                    Arrastre::CapaTrimI(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        if let Some(cp) = self.proyecto.capas.get_mut(i) {
+                            let d = d.clamp(-(cp.start.min(cp.c.t_in)),
+                                            cp.c.t_out - cp.c.t_in - 0.1);
+                            cp.c.t_in += d;
+                            cp.start += d;
+                        }
+                    }
+                    Arrastre::CapaTrimD(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        let tope = self.proyecto.capas.get(i)
+                            .map(|cp| e.dur_fuente(&cp.c.ruta)).unwrap_or(0.0);
+                        if let Some(cp) = self.proyecto.capas.get_mut(i) {
+                            let hasta = if tope > 0.01 { tope } else { f64::MAX };
+                            cp.c.t_out = (cp.c.t_out + d).clamp(cp.c.t_in + 0.1, hasta);
                         }
                     }
                     Arrastre::MusicaTrimI(i) => {
@@ -2081,10 +2138,12 @@ impl ApplicationHandler for App {
                             e.di("cuchilla quitada");
                         } else if e.modo_encuadre.take().is_some() {
                             e.di("encuadre cerrado");
-                        } else if e.sel.is_some() || !e.seleccion.is_empty() {
+                        } else if e.sel.is_some() || !e.seleccion.is_empty()
+                            || e.sel_capa.is_some() || e.sel_audio.is_some() {
                             e.sel = None;
                             e.seleccion.clear();
                             e.sel_audio = None;
+                            e.sel_capa = None;
                         } else {
                             e.bobinas = proyecto::bobinas(&self.proyecto.base);
                             e.sala = Sala::Portada;
@@ -2376,6 +2435,17 @@ impl ApplicationHandler for App {
                     }
                     PhysicalKey::Code(KeyCode::KeyB) => e.cuchilla(&mut self.proyecto),
                     PhysicalKey::Code(KeyCode::Backspace) | PhysicalKey::Code(KeyCode::Delete) => {
+                        // ¿hay una CAPA elegida? fuera ella
+                        if let Some(k) = e.sel_capa.take() {
+                            if k < self.proyecto.capas.len() {
+                                e.recuerda(&self.proyecto);
+                                let q = self.proyecto.capas.remove(k);
+                                let _ = self.proyecto.guarda();
+                                e.visor.foley(sonido::Foley::Corte);
+                                e.di(&format!("capa «{}» fuera", q.c.media));
+                            }
+                            return;
+                        }
                         // ¿hay una pista de MÚSICA elegida? se quita ella
                         if let Some(a) = e.sel_audio.take() {
                             if a < self.proyecto.audio.len() {
@@ -2791,8 +2861,19 @@ impl Estado {
 
     // ══════════ historial: no existe acción sin deshacer (80 pasos) ═══
 
-    fn bobinas_iguales(a: &(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>),
+    fn bobinas_iguales(a: &(Vec<proyecto::Clip>, Vec<proyecto::ClipAudio>,
+                            Vec<proyecto::Capa>),
                        pr: &Proyecto) -> bool {
+        // las capas también cuentan como cambio
+        if a.2.len() != pr.capas.len()
+            || !a.2.iter().zip(&pr.capas).all(|(x, y)| {
+                x.c.media == y.c.media && (x.start - y.start).abs() < 1e-9
+                    && (x.c.t_in - y.c.t_in).abs() < 1e-9
+                    && (x.c.t_out - y.c.t_out).abs() < 1e-9
+                    && (x.fundido_in - y.fundido_in).abs() < 1e-9
+                    && (x.fundido_out - y.fundido_out).abs() < 1e-9
+                    && x.c.enc == y.c.enc
+            }) { return false }
         a.0.len() == pr.clips.len() && a.0.iter().zip(&pr.clips).all(|(x, y)| {
             x.media == y.media && x.hueco == y.hueco
                 && (x.t_in - y.t_in).abs() < 1e-9 && (x.t_out - y.t_out).abs() < 1e-9
@@ -2811,7 +2892,7 @@ impl Estado {
     /// anota el estado ANTES de una mutación puntual (corte, quitar, añadir)
     fn recuerda(&mut self, pr: &Proyecto) {
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                  que: String::new() });
+                                  capas: pr.capas.clone(), que: String::new() });
         if self.historia.len() > 80 { self.historia.remove(0); }
         self.futuro.clear();
         self.espera_rotulo = true;
@@ -2820,7 +2901,8 @@ impl Estado {
 
     /// al empezar un gesto de arrastre: foto del estado
     fn abre_gesto(&mut self, pr: &Proyecto) {
-        self.gesto_previo = Some((pr.clips.clone(), pr.audio.clone()));
+        self.gesto_previo = Some((pr.clips.clone(), pr.audio.clone(),
+                                  pr.capas.clone()));
     }
 
     /// al soltar: si el gesto cambió algo, UN paso de historial
@@ -2828,7 +2910,7 @@ impl Estado {
         if let Some(prev) = self.gesto_previo.take() {
             if !Self::bobinas_iguales(&prev, pr) {
                 self.historia.push(Paso { clips: prev.0, audio: prev.1,
-                                          que: String::new() });
+                                          capas: prev.2, que: String::new() });
                 if self.historia.len() > 80 { self.historia.remove(0); }
                 self.futuro.clear();
                 self.espera_rotulo = true;
@@ -2903,6 +2985,7 @@ impl Estado {
             }
             A::Congelar => self.congela(pr),
             A::Desacopla => self.desacopla(pr),
+            A::InsertaBobina => self.inserta_bobina(pr),
             A::MarcaAqui => {
                 let t = pr.fps.max(1.0);
                 let t = (self.visor.t * t).round() / t;
@@ -3174,6 +3257,41 @@ impl Estado {
     /// el taller deja de dibujarse: sólo queda la imagen, encajada por su
     /// proporción sobre negro. El teclado no cambia — espacio, J/K/L, flechas
     /// y las marcas siguen donde estaban, que es de lo que se trata.
+    /// INSERTAR OTRA BOBINA como un clip (CAPAS §7): la anidada. El clip es
+    /// una ventana sobre la hija — se recorta como un clip y por dentro la
+    /// hija sigue viva (editarla y volver refresca).
+    fn inserta_bobina(&mut self, pr: &mut Proyecto) {
+        let Some(f) = rfd::FileDialog::new()
+            .add_filter("bobina", &["json"])
+            .set_title("¿qué bobina va dentro?")
+            .set_directory(pr.base.join("projects"))
+            .pick_file() else { return };
+        let Some(clave) = f.file_stem().map(|s| s.to_string_lossy().to_string()) else { return };
+        if clave == pr.nombre {
+            self.di("una bobina no puede llevarse a sí misma dentro");
+            return;
+        }
+        let info = proyecto::bobinas(&pr.base).into_iter()
+            .find(|b| b.clave == clave);
+        let dur = info.map(|b| b.dur).unwrap_or(0.0);
+        if dur < 0.1 {
+            self.di("esa bobina está vacía");
+            return;
+        }
+        self.recuerda(pr);
+        let mut c = pr.hueco_de(dur);
+        c.hueco = false;
+        c.media = format!("⤷ {clave}");
+        c.anidada = Some(clave.clone());
+        pr.clips.push(c);
+        pr.recarga_subbobinas();
+        let _ = pr.guarda();
+        self.sel = Some(pr.clips.len() - 1);
+        self.visor.foley(sonido::Foley::Lata);
+        self.visor.busca(pr, self.visor.t);
+        self.di(&format!("«{clave}» dentro, como un clip de {dur:.1} s"));
+    }
+
     /// DESACOPLAR EL SONIDO del clip que manda (el seleccionado, y si no, el
     /// que hay bajo la aguja): baja a una pista de audio propia y el clip se
     /// calla. A partir de ahí es material como cualquier otro — se mueve, se
@@ -3269,9 +3387,10 @@ impl Estado {
         let rotulo = if prev.que.is_empty() { "el último gesto".to_string() }
                      else { prev.que.clone() };
         self.futuro.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                que: prev.que });
+                                capas: pr.capas.clone(), que: prev.que });
         pr.clips = prev.clips;
         pr.audio = prev.audio;
+        pr.capas = prev.capas;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -3284,9 +3403,10 @@ impl Estado {
         let rotulo = if sig.que.is_empty() { "el último gesto".to_string() }
                      else { sig.que.clone() };
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
-                                  que: sig.que });
+                                  capas: pr.capas.clone(), que: sig.que });
         pr.clips = sig.clips;
         pr.audio = sig.audio;
+        pr.capas = sig.capas;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -3323,9 +3443,11 @@ impl Estado {
     fn cursor_mesa(&mut self, pr: &Proyecto) {
         use winit::window::CursorIcon as CI;
         let cur = match self.arrastrando {
-            Arrastre::ClipMueve(_) | Arrastre::MusicaMueve(_) => CI::Grabbing,
+            Arrastre::ClipMueve(_) | Arrastre::MusicaMueve(_)
+                | Arrastre::CapaMueve(_) | Arrastre::CapaEncuadre(_) => CI::Grabbing,
             _ if self.cubo_pinza.is_some() => CI::Grabbing,
-            Arrastre::MusicaTrimI(_) | Arrastre::MusicaTrimD(_) => CI::ColResize,
+            Arrastre::MusicaTrimI(_) | Arrastre::MusicaTrimD(_)
+                | Arrastre::CapaTrimI(_) | Arrastre::CapaTrimD(_) => CI::ColResize,
             Arrastre::MusicaPunto(_, _) | Arrastre::MusicaGain(_) => CI::NsResize,
             Arrastre::Encuadre(_) => CI::Move,
             Arrastre::EncTirador(_, k) => match k {
@@ -6084,6 +6206,22 @@ impl Estado {
         self.tira_y() + 88.0 + 14.0 + k as f32 * Self::ALTO_PISTA
     }
 
+    /// EL CARRIL DE LA CAPA (CAPAS §7): la franja fina encima de la tira de
+    /// vídeo. La misma geometría para dibujar y para tocar.
+    fn capa_y(&self) -> f32 { self.tira_y() - 30.0 }
+
+    /// la capa bajo el ratón, si la hay (la de encima gana)
+    fn capa_en_punto(&self, pr: &Proyecto, mx: f32, my: f32) -> Option<usize> {
+        let cy = self.capa_y();
+        if my < cy - 2.0 || my > cy + 22.0 { return None }
+        (0..pr.capas.len()).rev().find(|&k| {
+            let cp = &pr.capas[k];
+            let x0 = self.x_de(cp.start);
+            let x1 = self.x_de(cp.fin());
+            mx >= x0 && mx <= x1
+        })
+    }
+
     /// qué carril de música hay bajo una y de pantalla
     fn pista_en(&self, my: f32) -> Option<u8> {
         let y0 = self.pista_y(0);
@@ -6463,7 +6601,7 @@ impl Estado {
                 let dentro = fin.min(rb) - ini.max(ra);
                 t_out = t_in + dentro.max(0.04);
             }
-            Some(serde_json::json!({
+            let mut o = serde_json::json!({
                 "file": c.media, "in": t_in, "out": t_out, "fade": c.fade,
                 "speed": c.speed, "mute": c.mute, "desfase": c.desfase,
                 // EL ENCUADRE, TAL CUAL. Es el mismo modelo en la app y en el
@@ -6473,7 +6611,11 @@ impl Estado {
                 "cuartos": c.cuartos_fichero,
                 // la receta del clip, que puede no ser la de la bobina
                 "prefs": c.prefs.clone()
-            }))
+            });
+            // el clip anidado viaja con su clave; se aplana aquí mismo antes
+            // de mandar (CAPAS §8)
+            if let Some(a) = &c.anidada { o["anidada"] = serde_json::json!(a); }
+            Some(o)
         }).collect();
         if clips.is_empty() { self.di("el rango no coge ni un clip"); return; }
         let desliza = if solo_tramo { ra } else { 0.0 };
@@ -6517,6 +6659,52 @@ impl Estado {
             "vol_voz": if pr.mudo_voz { -60.0 } else { pr.vol_voz },
             "prefs": pr.clips.first().map(|c| c.prefs.clone()).unwrap_or(pr.prefs.clone()),
         });
+        // ── LAS CAPAS (CAPAS §3): el carril de encima, recortado al rango ──
+        let capas_payload: Vec<serde_json::Value> = pr.capas.iter().filter_map(|cp| {
+            let (ini, fin) = (cp.start, cp.fin());
+            if solo_tramo && (fin <= ra + 1e-6 || ini >= rb - 1e-6) { return None; }
+            let (mut c_in, mut c_out, mut st) = (cp.c.t_in, cp.c.t_out, ini);
+            if solo_tramo {
+                let v = cp.c.speed.abs().max(0.02);
+                if ini < ra { c_in += (ra - ini) * v; st = ra; }
+                if fin > rb { c_out -= (fin - rb) * v; }
+            }
+            let mut o = serde_json::json!({
+                "file": cp.c.media, "in": c_in, "out": c_out,
+                "start": st - if solo_tramo { ra } else { 0.0 },
+                "speed": cp.c.speed,
+                "tf": cp.c.enc.json(), "cuartos": cp.c.cuartos_fichero,
+                "prefs": cp.c.prefs.clone(),
+            });
+            if cp.fundido_in > 0.001 { o["fadeIn"] = serde_json::json!(cp.fundido_in); }
+            if cp.fundido_out > 0.001 { o["fadeOut"] = serde_json::json!(cp.fundido_out); }
+            Some(o)
+        }).collect();
+        let mut payload = payload;
+        if !capas_payload.is_empty() {
+            payload["clips2"] = serde_json::json!(capas_payload);
+        }
+        // ── EL APLANADO de las anidadas, aquí y no en el shell: la app tiene
+        // las hijas cargadas y el shell no sabe de claves (CAPAS §8)
+        let hay_anidadas = pr.clips.iter().any(|c| c.anidada.is_some());
+        if hay_anidadas {
+            let subs = &pr.subbobinas;
+            let media_dir = pr.base.join("media");
+            let res = filmlook_core::plan::aplana_anidadas(&mut payload,
+                &|clave| subs.get(clave).map(proyecto::payload_de_sub),
+                &|f| {
+                    let ruta = std::path::Path::new(f);
+                    let ruta = if ruta.is_file() { ruta.to_path_buf() }
+                               else { media_dir.join(f) };
+                    filmlook_core::indice::sondea(&ruta).ok()
+                        .map(|(w, h, _, _)| (w as f32, h as f32))
+                });
+            match res {
+                Ok(n) if n > 0 => self.di(&format!("{n} bobina(s) anidada(s), aplanadas")),
+                Err(e) => { self.di(&format!("anidadas: {e}")); return; }
+                _ => {}
+            }
+        }
         let tmp = std::env::temp_dir().join("saorin_revelado.json");
         if std::fs::write(&tmp, payload.to_string()).is_err() { self.di("no se pudo preparar"); return; }
         // EL REVELADOR: primero AL LADO de este ejecutable (una instalación de
@@ -6727,6 +6915,30 @@ impl Estado {
                 self.di("suéltala sobre la bobina para colocarla");
                 return true;
             }
+            // ── SOLTARLA EN EL CARRIL DE LA CAPA = una capa nueva ────────
+            // Vale un vídeo (PiP) o una foto/rótulo (con su alfa). El carril
+            // es la franja fina encima de la tira.
+            if c.fps >= 0.0 && (my - self.capa_y()).abs() <= 14.0 && mx > Self::ESTANTE_W {
+                self.recuerda(pr);
+                let start = self.tiempo_en(mx).max(0.0);
+                let mut clip = pr.clip_de(&c);
+                // una capa entra DIRECTA: el baño de la casa es para el
+                // material de cámara, no para un rótulo
+                if crate::foto::es_foto(&clip.ruta) {
+                    clip.prefs = serde_json::json!({});
+                    clip.lut_in = None;
+                    clip.lut_color = None;
+                }
+                pr.capas.push(proyecto::Capa {
+                    c: clip, start, fundido_in: 0.0, fundido_out: 0.0,
+                });
+                let _ = pr.guarda();
+                self.sel_capa = Some(pr.capas.len() - 1);
+                self.sel = None;
+                self.visor.foley(sonido::Foley::Lata);
+                self.di(&format!("«{}» a la capa, en {start:.1} s", c.nombre));
+                return true;
+            }
             if c.fps < 0.0 {
                 // una cinta de AUDIO cae en su carril, empezando donde se suelte
                 self.recuerda(pr);
@@ -6839,6 +7051,52 @@ impl Estado {
         let (ancho, alto) = self.gpu.alto_ancho();
         let (mx, my) = self.raton;
         let banco = self.banco_y();
+        // ── LA FICHA DE LA CAPA manda si hay una elegida (CAPAS §7) ──────
+        if let Some(k) = self.sel_capa {
+            let fx = ancho - Self::INSPECTOR_W + 10.0;
+            let (y1, _y2) = Self::musica_botones_y();
+            if mx > fx - 6.0 && k < pr.capas.len() {
+                let cual = |y: f32| -> Option<usize> {
+                    if my < y || my > y + 20.0 { return None; }
+                    if mx >= fx + 4.0 && mx <= fx + 78.0 { Some(0) }
+                    else if mx >= fx + 84.0 && mx <= fx + 158.0 { Some(1) }
+                    else { None }
+                };
+                // fila 1: fundidos de alfa, ciclados como los del clip
+                if let Some(b) = cual(y1) {
+                    self.recuerda(pr);
+                    let pasos = [0.0, 0.3, 0.6, 1.2];
+                    let cp = &mut pr.capas[k];
+                    let v = if b == 0 { &mut cp.fundido_in } else { &mut cp.fundido_out };
+                    let j = pasos.iter().position(|p| (p - *v).abs() < 0.01).unwrap_or(0);
+                    *v = pasos[(j + 1) % pasos.len()];
+                    let nuevo = *v;
+                    let _ = pr.guarda();
+                    self.di(&format!("la capa {} {nuevo:.1} s",
+                                     if b == 0 { "entra en" } else { "sale en" }));
+                    return;
+                }
+                // fila 2: quitar
+                if let Some(b) = cual(Self::musica_fila3_y()) {
+                    if b == 1 {
+                        self.recuerda(pr);
+                        let q = pr.capas.remove(k);
+                        self.sel_capa = None;
+                        let _ = pr.guarda();
+                        self.di(&format!("capa «{}» fuera", q.c.media));
+                        return;
+                    }
+                    // b == 0: el encuadre a cero (útil tras un PiP torcido)
+                    self.recuerda(pr);
+                    let cf = pr.capas[k].c.cuartos_fichero;
+                    pr.capas[k].c.enc = proyecto::Encuadre::limpio(cf);
+                    let _ = pr.guarda();
+                    self.di("el encuadre de la capa, a cero");
+                    return;
+                }
+                return;
+            }
+        }
         // ── LA FICHA DE LA MÚSICA manda si hay una pista elegida ─────────
         if let Some(ia) = self.sel_audio {
             let fx = ancho - Self::INSPECTOR_W + 10.0;
@@ -7192,6 +7450,26 @@ impl Estado {
                     return;
                 }
             }
+            // ── EL CARRIL DE LA CAPA (CAPAS §7): elegir, mover, recortar ──
+            if let Some(k) = self.capa_en_punto(pr, mx, my) {
+                self.sel_capa = Some(k);
+                self.sel = None;
+                self.seleccion.clear();
+                self.sel_audio = None;
+                let cp = &pr.capas[k];
+                let x0 = self.x_de(cp.start);
+                let x1 = self.x_de(cp.fin());
+                self.abre_gesto(pr);
+                self.arrastrando = if mx >= x0 && mx <= x0 + 7.0 {
+                    Arrastre::CapaTrimI(k)
+                } else if mx >= x1 - 7.0 && mx < x1 {
+                    Arrastre::CapaTrimD(k)
+                } else {
+                    Arrastre::CapaMueve(k)
+                };
+                self.visor.foley(sonido::Foley::Tick);
+                return;
+            }
             // la cinta de empalme (franja ALTA de la junta) cicla el fundido
             if my >= self.tira_y() - 10.0 && my < self.tira_y() + 12.0 {
                 let mut acc2 = 0.0f64;
@@ -7431,6 +7709,15 @@ impl Estado {
             }
         }
         if self.mods.alt_key() && en_vidrio {
+            // con una CAPA elegida, el alt-arrastre coloca EL PiP (CAPAS §7);
+            // si no, el encuadre del clip base, como siempre
+            if let Some(k) = self.sel_capa {
+                if k < pr.capas.len() {
+                    self.abre_gesto(pr);
+                    self.arrastrando = Arrastre::CapaEncuadre(k);
+                    return;
+                }
+            }
             if let Some((i, _)) = pr.en(self.visor.t) {
                 self.abre_gesto(pr);
                 self.arrastrando = Arrastre::Encuadre(i);
@@ -7868,7 +8155,7 @@ impl Estado {
         // van en el atlas, que se pinta SIEMPRE por encima de la capa de
         // rectángulos. Se veían las dos a la vez y no se leía ninguna. Un
         // panel, una ficha: la que hayas elegido.
-        let solo_musica = self.sel_audio.is_some();
+        let solo_musica = self.sel_audio.is_some() || self.sel_capa.is_some();
         let ix = ancho - Self::INSPECTOR_W;
         if !solo_musica {
         trazo::linea(&mut d, ix + 1.0, Self::CABECERA + 8.0, ix + 1.0, banco - 10.0,
@@ -8140,6 +8427,54 @@ impl Estado {
         }
         }   // fin de «si no estás mirando una música»
 
+        // ── LA FICHA DE LA CAPA (CAPAS §7) ──────────────────────────────
+        if let Some(k) = self.sel_capa {
+            if let Some(cp) = pr.capas.get(k) {
+                let fx = ancho - Self::INSPECTOR_W + 10.0;
+                let mut y = Self::CABECERA + 8.0;
+                let alto_ficha = (banco - 10.0 - (y - 6.0)).max(250.0);
+                trazo::linea(&mut d, fx - 10.0, Self::CABECERA + 8.0,
+                             fx - 10.0, banco - 10.0, 1.6, paleta::TINTA_TENUE, 43);
+                d.rect(fx - 6.0, y - 6.0, Self::INSPECTOR_W - 8.0, alto_ficha,
+                       [0.98, 0.97, 0.94, 1.0]);
+                trazo::caja(&mut d, fx - 6.0, y - 6.0, Self::INSPECTOR_W - 8.0,
+                            alto_ficha, 1.4, paleta::TINTA, 930);
+                d.texto_f(ui::Familia::Grot, fx + 4.0, y, "LA CAPA", 11.0, paleta::TINTA);
+                y += 22.0;
+                let nom: String = cp.c.media.chars().take(28).collect();
+                d.texto_f(ui::Familia::Mano, fx + 4.0, y, &nom, 17.0, paleta::TINTA);
+                y += 26.0;
+                let fila = |d: &mut ui::Dibujo, y: f32, k2: &str, v: &str| {
+                    d.texto(fx + 4.0, y, k2, 8.5, paleta::TINTA_TENUE);
+                    d.texto(fx + 108.0, y, v, 9.5, paleta::TINTA);
+                };
+                fila(&mut d, y, "entra en la bobina", &format!("{:.2} s", cp.start)); y += 16.0;
+                fila(&mut d, y, "dura", &format!("{:.2} s", cp.dur())); y += 16.0;
+                fila(&mut d, y, "del original", &format!("{:.2} → {:.2}",
+                                                         cp.c.t_in, cp.c.t_out)); y += 16.0;
+                fila(&mut d, y, "qué es", if crate::foto::es_foto(&cp.c.ruta) {
+                    "foto o rótulo (con su alfa)" } else { "vídeo (PiP)" }); y += 20.0;
+                let _ = y;
+                let (y1b, _) = Self::musica_botones_y();
+                let bot = |d: &mut ui::Dibujo, x: f32, y: f32, t: &str, on: bool| {
+                    trazo::caja(d, x, y, 74.0, 20.0, 1.2,
+                                if on { paleta::ROJO } else { paleta::TINTA_TENUE }, 941);
+                    d.texto(x + 8.0, y + 5.0, t, 8.5,
+                            if on { paleta::ROJO } else { paleta::TINTA });
+                };
+                bot(&mut d, fx + 4.0, y1b, &format!("entra {:.1}s", cp.fundido_in),
+                    cp.fundido_in > 0.01);
+                bot(&mut d, fx + 84.0, y1b, &format!("sale {:.1}s", cp.fundido_out),
+                    cp.fundido_out > 0.01);
+                let y3b = Self::musica_fila3_y();
+                bot(&mut d, fx + 4.0, y3b, "encuadre a 0", false);
+                bot(&mut d, fx + 84.0, y3b, "quitar (⌫)", false);
+                d.texto(fx + 4.0, y3b + 26.0, "arrástrala para moverla · bordes: recortar",
+                        8.0, paleta::TINTA_TENUE);
+                d.texto(fx + 4.0, y3b + 37.0, "alt-arrastre en el visor: colocar el PiP",
+                        8.0, paleta::TINTA_TENUE);
+            }
+        } else
         // ── LA FICHA DE LA MÚSICA ───────────────────────────────────────
         // Una pista de música es un clip como otro cualquiera y merece su
         // ficha: hasta ahora solo se podía añadir y arrastrar a ciegas.
@@ -8435,6 +8770,17 @@ impl Estado {
                            if c.hueco { [0.08, 0.07, 0.05, 1.0] }
                            else if c.ausente { [0.30, 0.10, 0.08, 1.0] }
                            else { paleta::PELICULA });
+                if c.anidada.is_some() && x + w > Self::ESTANTE_W {
+                    // UNA BOBINA DENTRO: marco doble, como una lata precintada
+                    let x0 = x.max(Self::ESTANTE_W);
+                    let x1 = (x + w).min(ancho);
+                    trazo::caja(&mut d2, x0 + 3.0, ty + 9.0, (x1 - x0 - 6.0).max(4.0),
+                                alto_tira - 18.0, 1.2, [0.16, 0.25, 0.65, 0.9], 1460);
+                    d2.texto_f(ui::Familia::Mano, x0 + 10.0, ty + 14.0,
+                               &format!("⤷ {}", c.anidada.clone().unwrap_or_default()
+                                        .chars().take(18).collect::<String>()),
+                               14.0, [0.16, 0.25, 0.65, 1.0]);
+                }
                 if c.ausente && x + w > Self::ESTANTE_W {
                     // rayado a mano: se ve de lejos que ese plano no tiene
                     // fichero, y la ficha dice cómo recuperarlo
@@ -8453,6 +8799,7 @@ impl Estado {
                 }
                 if !c.hueco {
                     let mut px = (x + 5.0).max(Self::ESTANTE_W);
+                    let _ = &mut px;
                     // las perforaciones caen en la rejilla del clip aunque
                     // la cabeza quede fuera de la vista
                     if x + 5.0 < Self::ESTANTE_W {
@@ -8464,9 +8811,16 @@ impl Estado {
                         d.rect(px, ty + alto_tira - 9.0, 6.5, 5.0, paleta::HUESO);
                         px += 12.0;
                     }
-                    // fotogramas REALES dentro de la tira (del proxy, instantáneos)
-                    let proxy = pr.base.join(".proxies").join(&c.media);
-                    let ruta = if proxy.is_file() { proxy } else { c.ruta.clone() };
+                    // fotogramas REALES dentro de la tira (del proxy, instantáneos).
+                    // Un clip ANIDADO enseña los del primer clip de su hija.
+                    let (media_m, ruta_m) = match c.anidada.as_ref()
+                        .and_then(|k| pr.subbobinas.get(k))
+                        .and_then(|sb| sb.clips.first()) {
+                        Some(hc) => (hc.media.clone(), hc.ruta.clone()),
+                        None => (c.media.clone(), c.ruta.clone()),
+                    };
+                    let proxy = pr.base.join(".proxies").join(&media_m);
+                    let ruta = if proxy.is_file() { proxy } else { ruta_m };
                     let alto_foto = alto_tira - 22.0;
                     // el lienzo de la miniatura es 16:9 fijo; el contenido ya
                     // encaja dentro con sus bandas (fuente vertical incluida)
@@ -8479,7 +8833,7 @@ impl Estado {
                         if restante < 8.0 || xk + restante < Self::ESTANTE_W { continue; }
                         let src_t = (c.t_in + ((xk - x) / self.pxs) as f64)
                             .clamp(c.t_in, (c.t_out - 0.02).max(c.t_in));
-                        let clave = (c.media.clone(), (src_t * 100.0) as u32);
+                        let clave = (media_m.clone(), (src_t * 100.0) as u32);
                         if let Some(slot) = self.minis.pide(clave, &ruta, src_t) {
                             dt.quad_rec(Self::ESTANTE_W, xk, ty + 11.0, restante, alto_foto,
                                         slot, restante / ancho_foto);
@@ -8816,6 +9170,45 @@ impl Estado {
         // con su tiempo en pequeño. Mover la aguja NO la mueve: esa es la
         // gracia — se puede cortar en un punto sin perder el sitio donde
         // estabas mirando.
+        // ── EL CARRIL DE LA CAPA (CAPAS §7) ─────────────────────────────
+        // Tiras finas encima de la tira de vídeo: se ve QUÉ hay encima y
+        // CUÁNDO. La elegida, en rojo; los fundidos, como cuñas.
+        {
+            let cy = self.capa_y();
+            for (k, cp) in pr.capas.iter().enumerate() {
+                let x0 = self.x_de(cp.start).max(Self::ESTANTE_W);
+                let x1 = self.x_de(cp.fin()).min(ancho);
+                if x1 <= x0 { continue }
+                let elegida = self.sel_capa == Some(k);
+                let fondo = if crate::foto::es_foto(&cp.c.ruta) {
+                    [0.949, 0.78, 0.267, 0.85]      // ámbar: foto o rótulo
+                } else {
+                    [0.42, 0.55, 0.78, 0.85]        // azulado: vídeo (PiP)
+                };
+                d2.rect(x0, cy, x1 - x0, 20.0, fondo);
+                if elegida {
+                    trazo::caja(&mut d2, x0, cy, x1 - x0, 20.0, 1.8, paleta::ROJO, 1450);
+                } else {
+                    trazo::caja(&mut d2, x0, cy, x1 - x0, 20.0, 1.0,
+                                [0.2, 0.18, 0.15, 0.8], 1450 + k as u32);
+                }
+                // las cuñas de los fundidos
+                if cp.fundido_in > 0.01 {
+                    let fw = (cp.fundido_in as f32 * self.pxs).min(x1 - x0);
+                    d2.rect(x0, cy, fw, 20.0, [1.0, 1.0, 1.0, 0.25]);
+                }
+                if cp.fundido_out > 0.01 {
+                    let fw = (cp.fundido_out as f32 * self.pxs).min(x1 - x0);
+                    d2.rect(x1 - fw, cy, fw, 20.0, [1.0, 1.0, 1.0, 0.25]);
+                }
+                let n: String = cp.c.media.chars().take(((x1 - x0 - 8.0) / 6.0)
+                                                        .max(0.0) as usize).collect();
+                d2.texto(x0 + 4.0, cy + 5.0, &n, 8.0, [0.1, 0.09, 0.08, 1.0]);
+            }
+            if !pr.capas.is_empty() {
+                d2.texto(Self::ESTANTE_W + 4.0, cy + 5.0, "", 8.0, paleta::TINTA_TENUE);
+            }
+        }
         // LA CUCHILLA SE DIBUJA DONDE VA A MORDER. Con una música elegida
         // corta la música, pero la tijera se seguía pintando sobre la tira de
         // vídeo: marcabas en un sitio y cortaba en otro. Ver el corte antes de

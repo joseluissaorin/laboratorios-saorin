@@ -60,6 +60,12 @@ pub struct Visor {
     // la cadena
     targets: TargetSet,
     grade: Pass, down: Pass, blur: Pass, accum: Pass, present: Pass,
+    /// el pase de LA CAPA (CAPAS §6): el mismo revelado, compuesto por alfa
+    grade_capa: Pass,
+    /// texturas RGBA residentes de las capas foto/rótulo, por ruta
+    capa_rgba: std::collections::HashMap<PathBuf, (wgpu::Texture, wgpu::TextureView)>,
+    /// los uniformes de los dos huecos de capa
+    capa_bufs: [wgpu::Buffer; 2],
     samp: wgpu::Sampler, samp_rep: wgpu::Sampler,
     t_y: wgpu::Texture, t_u: wgpu::Texture, t_v: wgpu::Texture,
     grade_bg: wgpu::BindGroup,
@@ -205,6 +211,14 @@ impl Visor {
             tex_uint_entry(1), tex_uint_entry(2), tex_uint_entry(3),
             tex_filter_entry(4), tex3d_entry(5), tex3d_entry(6), sampler_entry(7),
         ], &[color_target(), color_target()]);
+        // el MISMO pase, con mezcla por alfa: es lo que compone una capa
+        // encima sin sustituir lo revelado (CAPAS §6)
+        let grade_capa = make_pass(dev, include_str!("../../core/src/shaders/grade.wgsl"), &[
+            uniform_entry(0, filmlook_core::params::bytes_uniforme::<filmlook_core::params::GradeU>()),
+            tex_uint_entry(1), tex_uint_entry(2), tex_uint_entry(3),
+            tex_filter_entry(4), tex3d_entry(5), tex3d_entry(6), sampler_entry(7),
+        ], &[filmlook_core::pipeline::color_target_blend(filmlook_core::pipeline::TEX_FMT),
+             filmlook_core::pipeline::color_target_blend(filmlook_core::pipeline::TEX_FMT)]);
         let down = make_pass(dev, include_str!("../../core/src/shaders/down.wgsl"), &[
             uniform_entry(0, 16), tex_filter_entry(1), sampler_entry(2),
         ], &[color_target()]);
@@ -265,7 +279,7 @@ impl Visor {
             fotos: std::collections::HashMap::new(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             escrutinio: std::collections::HashMap::new(),
-            targets, grade, down, blur, accum, present, samp, samp_rep,
+            targets, grade, grade_capa, down, blur, accum, present, samp, samp_rep,
             t_y, t_u, t_v, grade_bg, view_grain, grade_buf, comp_buf, small_u,
             comp_bg: None,
             lupa_buf,
@@ -278,6 +292,21 @@ impl Visor {
             vistas_yuv: (vy, vu, vv), vista_video: vvideo,
             cache_lut: std::collections::HashMap::new(),
             tam_cache: std::collections::HashMap::new(),
+            capa_rgba: std::collections::HashMap::new(),
+            capa_bufs: [
+                g.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("capa 0"),
+                    size: params::bytes_uniforme::<params::GradeU>(),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                g.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("capa 1"),
+                    size: params::bytes_uniforme::<params::GradeU>(),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+            ],
             lut_puestas: (String::new(), String::new()),
             bg_sucio: false,
             encuadre: crate::proyecto::Encuadre::limpio(0),
@@ -290,6 +319,21 @@ impl Visor {
     }
 
     /// el proxy del taller si está cocido; si no, el máster
+    /// LA FUENTE REAL de un clip para la preview (CAPAS §6): si es una
+    /// anidada, el clip hijo que suena en ese instante. Devuelve también el
+    /// tiempo de fuente ya traducido.
+    fn fuente_real(pr: &Proyecto, i: usize, src_t: f64) -> (PathBuf, f64, f64) {
+        match pr.resuelve(i, src_t) {
+            Some((c, t)) => {
+                // el proxy del hijo, si existe
+                let p = pr.base.join(".proxies").join(&c.media);
+                let ruta = if p.is_file() { p } else { c.ruta.clone() };
+                (ruta, t, c.t_out)
+            }
+            None => (PathBuf::new(), src_t, src_t),
+        }
+    }
+
     fn ruta_proxy(pr: &Proyecto, i: usize) -> PathBuf {
         let c = &pr.clips[i];
         let p = pr.base.join(".proxies").join(&c.media);
@@ -538,6 +582,20 @@ impl Visor {
             self.sonido.manda(OrdenAudio::Para);
             return;
         }
+        if c.anidada.is_some() {
+            // la ANIDADA (CAPAS §6): se proyecta el clip hijo que toque; el
+            // sonido de la hija no viaja en la preview (anotado en CAPAS.md)
+            let (ruta, t0, t1) = Self::fuente_real(pr, i, src_t);
+            if ruta.as_os_str().is_empty() {
+                self.sonido.manda(OrdenAudio::Para);
+                return;
+            }
+            self.cabina.manda(Orden::Toca {
+                gen: self.gen, ruta, t0, t1, tier: Tier::Proxy,
+            });
+            self.sonido.manda(OrdenAudio::Para);
+            return;
+        }
         self.cabina.manda(Orden::Toca {
             gen: self.gen, ruta: Self::ruta_proxy(pr, i),
             t0: src_t, t1: c.t_out, tier: Tier::Proxy,
@@ -670,7 +728,14 @@ impl Visor {
     /// del scrub no espera ni una vuelta del bucle. Devuelve false si no pudo.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn busca_sincrono(&mut self, pr: &Proyecto, i: usize, src_t: f64) -> bool {
-        let ruta = Self::ruta_proxy(pr, i);
+        // la anidada resuelve al clip hijo (CAPAS §6)
+        let (ruta, src_t) = if pr.clips.get(i).map(|c| c.anidada.is_some()).unwrap_or(false) {
+            let (r, t, _) = Self::fuente_real(pr, i, src_t);
+            if r.as_os_str().is_empty() { return false }
+            (r, t)
+        } else {
+            (Self::ruta_proxy(pr, i), src_t)
+        };
         if !self.escrutinio.contains_key(&ruta) {
             if self.escrutinio.len() >= 4 {
                 if let Some(k) = self.escrutinio.keys().next().cloned() {
@@ -873,6 +938,155 @@ impl Visor {
 
         run_pass(enc, &self.grade, &self.grade_bg,
                  &[&self.targets.graded.view, &self.targets.raw.view]);
+
+        // ── LAS CAPAS (CAPAS §6): hasta dos, compuestas por alfa encima ──
+        // Fotos y rótulos van residentes en RGBA; una capa de vídeo se
+        // decodifica síncrona (el mismo camino del scrub) y sube como RGBA
+        // convertida — la preview dice la verdad también con capas.
+        if !pr.capas.is_empty() {
+            // la gelatina identidad tiene que existir antes de atar el grupo
+            self.carga_lut(g, "");
+        }
+        for (hueco, (k, t_f, alfa)) in pr.capas_en(self.t).into_iter().enumerate() {
+            if alfa <= 0.001 { continue }
+            let Some(cp) = pr.capas.get(k) else { continue };
+            let vista = if crate::foto::es_foto(&cp.c.ruta) {
+                if !self.capa_rgba.contains_key(&cp.c.ruta) {
+                    if let Ok((fw, fh, datos)) = filmlook_core::foto::rgba(&cp.c.ruta) {
+                        let t = g.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("capa rgba"),
+                            size: wgpu::Extent3d { width: fw, height: fh,
+                                                   depth_or_array_layers: 1 },
+                            mip_level_count: 1, sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                 | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        g.queue.write_texture(
+                            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All },
+                            &datos,
+                            wgpu::TexelCopyBufferLayout { offset: 0,
+                                bytes_per_row: Some(fw * 4), rows_per_image: None },
+                            wgpu::Extent3d { width: fw, height: fh,
+                                             depth_or_array_layers: 1 });
+                        let v = t.create_view(&Default::default());
+                        self.capa_rgba.insert(cp.c.ruta.clone(), (t, v));
+                    }
+                }
+                self.capa_rgba.get(&cp.c.ruta).map(|(_, v)| v)
+            } else {
+                // capa de VÍDEO: el fotograma síncrono convertido a RGBA una
+                // vez por redraw (proxy o máster; en pausa es exacto)
+                let ruta = cp.c.ruta.clone();
+                let fr = {
+                    if !self.escrutinio.contains_key(&ruta) {
+                        if let Ok(mut c2) = filmlook_core::cine::Cine::abre(&ruta) {
+                            c2.mitad = crate::prefs::PREVIEW_MEDIA
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            self.escrutinio.insert(ruta.clone(), c2);
+                        }
+                    }
+                    self.escrutinio.get_mut(&ruta).and_then(|c2| c2.frame_en(t_f))
+                };
+                if let Some(f) = fr {
+                    let clave_t = PathBuf::from(format!("{}·video", ruta.display()));
+                    let rehacer = self.capa_rgba.get(&clave_t)
+                        .map(|(t, _)| t.width() != f.w || t.height() != f.h)
+                        .unwrap_or(true);
+                    if rehacer {
+                        let t = g.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("capa video"),
+                            size: wgpu::Extent3d { width: f.w, height: f.h,
+                                                   depth_or_array_layers: 1 },
+                            mip_level_count: 1, sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                 | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        let v = t.create_view(&Default::default());
+                        self.capa_rgba.insert(clave_t.clone(), (t, v));
+                    }
+                    let (t, _) = &self.capa_rgba[&clave_t];
+                    // YUV → RGBA de 8 bits en CPU: suficiente para la capa de
+                    // la preview (el máster va por su camino de 10 bits)
+                    let mut rgba = vec![0u8; (f.w * f.h * 4) as usize];
+                    for y in 0..f.h as usize {
+                        for x in 0..f.w as usize {
+                            let yy = f.y[y * f.w as usize + x] as f32;
+                            let cu = f.u[(y / 2) * (f.w as usize / 2) + x / 2] as f32;
+                            let cv = f.v[(y / 2) * (f.w as usize / 2) + x / 2] as f32;
+                            let yl = ((yy / 1023.0 * 255.0) - 16.0) / 219.0 * 255.0;
+                            let ub = (cu / 1023.0 * 255.0) - 128.0;
+                            let vb = (cv / 1023.0 * 255.0) - 128.0;
+                            let r = (yl + 1.5748 * vb).clamp(0.0, 255.0) as u8;
+                            let gg = (yl - 0.1873 * ub - 0.4681 * vb).clamp(0.0, 255.0) as u8;
+                            let b = (yl + 1.8556 * ub).clamp(0.0, 255.0) as u8;
+                            let o = (y * f.w as usize + x) * 4;
+                            rgba[o] = r; rgba[o + 1] = gg; rgba[o + 2] = b; rgba[o + 3] = 255;
+                        }
+                    }
+                    g.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                        &rgba,
+                        wgpu::TexelCopyBufferLayout { offset: 0,
+                            bytes_per_row: Some(f.w * 4), rows_per_image: None },
+                        wgpu::Extent3d { width: f.w, height: f.h,
+                                         depth_or_array_layers: 1 });
+                    self.capa_rgba.get(&clave_t).map(|(_, v)| v)
+                } else { None }
+            };
+            let Some(vista) = vista else { continue };
+            // el uniforme de esta capa: src_mode 3 (RGBA con alfa), su
+            // encuadre sobre el lienzo del proyecto y su alfa como peso
+            let (fw, fh) = (vista as *const wgpu::TextureView, ());
+            let _ = (fw, fh);
+            let dims = self.capa_rgba.iter()
+                .find(|(_, (_, vv)) | std::ptr::eq(vv, vista))
+                .map(|(_, (t, _))| (t.width(), t.height())).unwrap_or((2, 2));
+            let mut gu = params::grade_u_enc(&cp.c.prefs, dims.0, dims.1, 2, 2,
+                                             false, false, &cp.c.enc,
+                                             self.w, self.h);
+            gu.src_mode = 3;
+            gu.peso = alfa;
+            g.queue.write_buffer(&self.capa_bufs[hueco.min(1)], 0,
+                                 bytemuck::bytes_of(&gu));
+            let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None, layout: &self.grade_capa.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,
+                        resource: self.capa_bufs[hueco.min(1)].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.vistas_yuv.0) },
+                    wgpu::BindGroupEntry { binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.vistas_yuv.1) },
+                    wgpu::BindGroupEntry { binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.vistas_yuv.2) },
+                    wgpu::BindGroupEntry { binding: 4,
+                        resource: wgpu::BindingResource::TextureView(vista) },
+                    wgpu::BindGroupEntry { binding: 5,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.cache_lut.get("").map(|(_, v)| v.clone())
+                                .unwrap_or_else(|| self.cache_lut.values().next()
+                                    .map(|(_, v)| v.clone()).unwrap()) ) },
+                    wgpu::BindGroupEntry { binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.cache_lut.get("").map(|(_, v)| v.clone())
+                                .unwrap_or_else(|| self.cache_lut.values().next()
+                                    .map(|(_, v)| v.clone()).unwrap()) ) },
+                    wgpu::BindGroupEntry { binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self.samp) },
+                ],
+            });
+            run_pass(enc, &self.grade_capa, &bg,
+                     &[&self.targets.graded.view, &self.targets.raw.view]);
+        }
 
         let usa_shutter = self.shutter > 0.001;
         if usa_shutter {

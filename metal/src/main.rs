@@ -292,6 +292,7 @@ fn main() -> Result<()> {
                     },
                     shutter: f("shutter", 0.0),
                     weave_amount: f("weave", 0.0),
+                    blanco: filmlook_metal::metal_pipe::tex_blanca(&gpu.device),
                     gpu: gpu.clone(),
                     pipes: pipes.clone(),
                     targets,

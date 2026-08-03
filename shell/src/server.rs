@@ -1582,7 +1582,12 @@ fn revela_bobina(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &st
             && payload["project"]["fadeTail"].as_f64().unwrap_or(0.0) < 0.005;
         let normal = (unico["speed"].as_f64().unwrap_or(1.0) - 1.0).abs() < 1e-6
             && !unico["gap"].as_bool().unwrap_or(false)
-            && !unico["mute"].as_bool().unwrap_or(false);
+            && !unico["mute"].as_bool().unwrap_or(false)
+            // con CAPAS encima, matriz explícita o anidadas hay que revelar
+            // de verdad: el remux copiaría el material pelado (CAPAS §9)
+            && payload["clips2"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+            && unico["mat"].is_null()
+            && unico["anidada"].is_null();
         let src = resolve_media(d, unico["file"].as_str().unwrap_or(""));
         if sin_look && sin_gelatina && sin_encuadre && sin_fundidos && normal && src.is_file() {
             let sp = probe(&src);
@@ -1648,6 +1653,44 @@ fn revela_bobina(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &st
             c["file"] = serde_json::json!(ruta.to_string_lossy());
         }
     }
+    // ── LAS BOBINAS ANIDADAS, APLANADAS (CAPAS §8) ────────────────────
+    // La app manda los payloads ya aplanados; esto cubre el CLI y el bot,
+    // donde «anidada» puede ser la RUTA a un payload hijo en JSON.
+    if plan["clips"].as_array().map(|a| a.iter().any(|c| !c["anidada"].is_null()))
+        .unwrap_or(false) {
+        let n = crate::plan::aplana_anidadas(&mut plan,
+            &|clave| std::fs::read_to_string(clave).ok()
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            &|f| {
+                let p = probe(std::path::Path::new(f));
+                let (w, h) = (p["w"].as_f64()?, p["h"].as_f64()?);
+                if w > 0.0 && h > 0.0 { Some((w as f32, h as f32)) } else { None }
+            }).map_err(|e| format!("anidadas: {e}"))?;
+        if n > 0 { diario(&format!("   anidadas: {n} bobina(s) aplanada(s)")); }
+    }
+
+    // ── LAS CAPAS: mismas sondas que los clips ────────────────────────
+    if let Some(a) = plan["clips2"].as_array_mut() {
+        for c in a.iter_mut() {
+            let f = c["file"].as_str().unwrap_or("").to_string();
+            let ruta = resolve_media(d, &f);
+            if !c["gap"].as_bool().unwrap_or(false)
+                && (c["cuartos"].is_null() || c["fps_src"].is_null()) {
+                let p = probe(&ruta);
+                if c["cuartos"].is_null() {
+                    let q = p["cuartos"].as_u64().unwrap_or(0);
+                    if q != 0 { c["cuartos"] = serde_json::json!(q); }
+                }
+                if c["fps_src"].is_null() {
+                    let f2 = p["fps"].as_f64().unwrap_or(0.0);
+                    if f2 > 0.0 { c["fps_src"] = serde_json::json!(f2); }
+                }
+            }
+            c["file"] = serde_json::json!(ruta.to_string_lossy());
+        }
+        if !a.is_empty() { diario(&format!("   capas: {} encima de la bobina", a.len())); }
+    }
+
     let ruta_plan = d.tmp.join("plan_bobina.json");
     std::fs::write(&ruta_plan, plan.to_string()).map_err(|e| format!("escribir el plan: {e}"))?;
 
@@ -1675,6 +1718,7 @@ fn revela_bobina(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &st
     // Lo que aún NO hace es afinar por clip; eso pide caché por GOP.
     let mut hasher = DefaultHasher::new();
     plan["clips"].to_string().hash(&mut hasher);
+    plan["clips2"].to_string().hash(&mut hasher);
     plan["prefs"].to_string().hash(&mut hasher);
     format!("{pw}x{ph}@{pfps:.4}").hash(&mut hasher);
     format!("{m_codec}|{m_bitrate}").hash(&mut hasher);
@@ -1917,12 +1961,13 @@ fn revela_por_tramos(plan: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &s
         // la clave es el CONTENIDO del tramo, no dónde cae en la bobina
         let mut h = DefaultHasher::new();
         for r in &comp.renglones[desde..(desde + cuantos).min(comp.renglones.len())] {
-            format!("{}|{}|{:.5}|{:.5}|{:.5}|{:.5}",
-                    r.fuente_a, r.fuente_b, r.peso_b, r.t_a, r.t_b, r.nivel_color)
+            format!("{}|{}|{:.5}|{:.5}|{:.5}|{:.5}|{}|{:.5}|{:.4}|{}|{:.5}|{:.4}",
+                    r.fuente_a, r.fuente_b, r.peso_b, r.t_a, r.t_b, r.nivel_color,
+                    r.fuente_c, r.t_c, r.alfa_c, r.fuente_d, r.t_d, r.alfa_d)
                 .hash(&mut h);
         }
         for f in comp.renglones[desde..(desde + cuantos).min(comp.renglones.len())].iter()
-                     .flat_map(|r| [r.fuente_a, r.fuente_b])
+                     .flat_map(|r| [r.fuente_a, r.fuente_b, r.fuente_c, r.fuente_d])
                      .filter(|x| (*x as usize) < comp.fuentes.len())
                      .collect::<std::collections::BTreeSet<_>>() {
             let s = &comp.fuentes[f as usize];
@@ -1930,7 +1975,10 @@ fn revela_por_tramos(plan: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &s
             s.prefs.to_string().hash(&mut h);
             // el ENCUADRE entero entra en la clave: si cambia, el tramo se
             // vuelve a revelar (y si no, sale del cajón tal cual)
-            format!("{:?}|{:?}|{:?}|{}", s.lut_in, s.lut, s.enc, s.foto).hash(&mut h);
+            // la matriz explícita y la marca de capa TAMBIÉN son la receta:
+            // mover una anidada o convertir algo en capa cambia el tramo
+            format!("{:?}|{:?}|{:?}|{}|{}|{:?}",
+                    s.lut_in, s.lut, s.enc, s.foto, s.capa, s.mat).hash(&mut h);
         }
         format!("{}x{}@{:.4}|{}|{}", comp.w, comp.h, comp.fps, comp.codec, comp.bitrate)
             .hash(&mut h);

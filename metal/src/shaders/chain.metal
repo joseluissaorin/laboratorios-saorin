@@ -133,6 +133,20 @@ fragment float4 fs_grade_solo(VsOut in [[stage_in]],
   texture2d<float> tHist [[texture(5)]],
   sampler samp [[sampler(0)]],
   sampler samp_n [[sampler(1)]]) {
+  // ── LA CAPA (CAPAS §4) ───────────────────────────────────────────────
+  // Fuera del encuadre una capa es TRANSPARENTE (no letterbox negro), y si
+  // es RGBA (src_mode 3) su alfa por píxel multiplica al peso del pase.
+  {
+    float2 fuv;
+    bool dentro = encuadra(P, in.uv, fuv);
+    if (P.src_mode >= 2 && !dentro) { return float4(0.0); }
+    if (P.src_mode == 3) {
+      float4 px = tVideo.sample(samp, fuv);
+      float3 c = clamp(max(px.rgb, 0.0) * exp2(P.gain), 0.0, 1.0);
+      if (P.lut_b_on == 1) { c = clamp(lut3(tLutB, P.lut_nb, c, samp_n), 0.0, 1.0); }
+      return float4(c, P.peso * px.a);
+    }
+  }
   float3 raw, graded;
   revela(in, P, tY, tUV, tVideo, tLutA, tLutB, samp, samp_n, raw, graded);
   // EL OBTURADOR, FUNDIDO AQUÍ (MOTOR §3). Era un pase entero aparte que

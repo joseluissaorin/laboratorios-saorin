@@ -173,6 +173,15 @@ pub struct Fuente {
     /// UNA FOTO O UN RÓTULO: no hay nada que decodificar, se sube una vez y
     /// se queda residente en la GPU (§4bis.10)
     pub foto: bool,
+    /// ES UNA CAPA (CAPAS §1): se compone ENCIMA del fotograma en vez de
+    /// serlo. Cambia la semántica del shader: fuera de su encuadre queda
+    /// transparente —no negro— y si es RGBA su alfa viaja por píxel.
+    pub capa: bool,
+    /// MATRIZ EXPLÍCITA (CAPAS §8): el aplanado de bobinas anidadas compone
+    /// las afines de fuera y de dentro en una sola; cuando viene, manda
+    /// sobre el encuadre. Es lo que permite que el motor no sepa que hubo
+    /// anidamiento.
+    pub mat: Option<[f32; 6]>,
 }
 
 /// UN FOTOGRAMA DE SALIDA
@@ -189,6 +198,18 @@ pub struct Renglon {
     /// fundido contra un color plano (negro=0, blanco=1); `nivel` es cuánto
     pub color_fijo: f32,
     pub nivel_color: f32,
+    /// LA CAPA de este fotograma (CAPAS §3): un dibujo más, encima de A y B.
+    /// `NINGUNA` si no hay. `alfa_c` es su alfa global (los fundidos de
+    /// entrada y salida de la capa); el alfa por píxel, si es RGBA, va aparte
+    /// y lo multiplica el shader.
+    pub fuente_c: u32,
+    pub t_c: f64,
+    pub alfa_c: f32,
+    /// LA SEGUNDA CAPA: dos pueden convivir (un rótulo sobre un PiP es el
+    /// caso normal). D se dibuja DESPUÉS de C: es la de más arriba.
+    pub fuente_d: u32,
+    pub t_d: f64,
+    pub alfa_d: f32,
     /// AQUÍ EMPIEZA UN PLANO NUEVO. Un corte seco no tiene continuidad de luz:
     /// el arrastre del obturador **no cruza el empalme**. Sin esto, el primer
     /// fotograma del clip entrante llevaba encima un 14 % del clip que se iba
@@ -270,6 +291,8 @@ pub fn compila(payload: &Value) -> Result<Plan, String> {
             veloc,
             foto: !hueco && es_foto(
                 std::path::Path::new(c["file"].as_str().unwrap_or(""))),
+            capa: false,
+            mat: mat_de_json(&c["mat"]),
         });
         let t_in = c["in"].as_f64().unwrap_or(0.0);
         let t_out = c["out"].as_f64().unwrap_or(0.0).max(t_in);
@@ -314,6 +337,8 @@ pub fn compila(payload: &Value) -> Result<Plan, String> {
             fuente_a: src as u32, fuente_b: NINGUNA, peso_b: 0.0,
             t_a: t_fuente(t_in, t_out, i, fps, f.veloc),
             t_b: 0.0, color_fijo: 0.0, nivel_color: 0.0,
+            fuente_c: NINGUNA, t_c: 0.0, alfa_c: 0.0,
+            fuente_d: NINGUNA, t_d: 0.0, alfa_d: 0.0,
             corte: false,
         };
         // ¿estamos dentro de la junta con el siguiente?
@@ -429,6 +454,81 @@ pub fn compila(payload: &Value) -> Result<Plan, String> {
         }
     }
 
+    // ── LAS CAPAS (CAPAS §3) ─────────────────────────────────────────────
+    // `clips2` es el carril de encima: clips COLOCADOS (con `start`), no en
+    // secuencia. Por fotograma se elige la capa de más arriba que cubra ese
+    // instante (la última de la lista: el orden ES el apilado) y su alfa
+    // global sale de sus fundidos de entrada y salida.
+    let capas = payload["clips2"].as_array().cloned().unwrap_or_default();
+    if !capas.is_empty() {
+        struct Cp { src: usize, start: f64, dur: f64, t_in: f64, t_out: f64,
+                    veloc: f64, fi: f64, fo: f64 }
+        let mut lista: Vec<Cp> = Vec::new();
+        for c in &capas {
+            let veloc = c["speed"].as_f64().unwrap_or(1.0).clamp(-8.0, 8.0);
+            let veloc = if veloc.abs() < 0.02 { 0.0 } else { veloc };
+            let ruta = c["file"].as_str().unwrap_or("");
+            fuentes.push(Fuente {
+                fichero: ruta.to_string(),
+                hueco: false,
+                prefs: match c["prefs"].as_object() {
+                    Some(o) if !o.is_empty() => c["prefs"].clone(),
+                    // una capa sin receta va DIRECTA: un rótulo no pasó por
+                    // la cámara y no le toca el baño de la casa
+                    _ => Value::Null,
+                },
+                lut_in: c["lut_in"].as_str().map(String::from),
+                lut: c["lut"].as_str().map(String::from),
+                enc: Encuadre::de_json(&c["tf"], c["cuartos"].as_u64().unwrap_or(0) as u8),
+                veloc,
+                foto: es_foto(std::path::Path::new(ruta)),
+                capa: true,
+                mat: mat_de_json(&c["mat"]),
+            });
+            let t_in = c["in"].as_f64().unwrap_or(0.0);
+            let t_out = c["out"].as_f64().unwrap_or(0.0).max(t_in);
+            let dur = if veloc.abs() < 0.02 { t_out - t_in }
+                      else { (t_out - t_in) / veloc.abs() };
+            lista.push(Cp {
+                src: fuentes.len() - 1,
+                start: c["start"].as_f64().unwrap_or(0.0).max(0.0),
+                dur, t_in, t_out, veloc,
+                fi: c["fadeIn"].as_f64().unwrap_or(0.0).max(0.0),
+                fo: c["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
+            });
+        }
+        for (t, r) in renglones.iter_mut().enumerate() {
+            let seg = t as f64 / fps;
+            // LAS DOS DE MÁS ARRIBA que cubran este instante (el orden de la
+            // lista es el apilado): la de abajo va al hueco C y la de encima
+            // al D, que se dibuja después. Tres o más solapadas a la vez: se
+            // quedan las dos superiores, y el diario lo dice.
+            let mut cubren = lista.iter()
+                .filter(|c| seg >= c.start - 1e-9 && seg < c.start + c.dur - 1e-9);
+            let bajo_topmost: Vec<&Cp> = {
+                let mut v: Vec<&Cp> = cubren.by_ref().collect();
+                let n = v.len();
+                if n > 2 { v.drain(..n - 2); }
+                v
+            };
+            for (hueco, cp) in bajo_topmost.iter().enumerate() {
+                let dentro = seg - cp.start;
+                let i = (dentro * fps).round() as usize;
+                let tt = t_fuente(cp.t_in, cp.t_out, i, fps, cp.veloc);
+                let mut a = 1.0f32;
+                if cp.fi > 0.001 { a = a.min((dentro / cp.fi) as f32); }
+                if cp.fo > 0.001 { a = a.min(((cp.dur - dentro) / cp.fo) as f32); }
+                let a = a.clamp(0.0, 1.0);
+                // la primera (más abajo) al C; la segunda (encima) al D
+                if hueco == 0 {
+                    r.fuente_c = cp.src as u32; r.t_c = tt; r.alfa_c = a;
+                } else {
+                    r.fuente_d = cp.src as u32; r.t_d = tt; r.alfa_d = a;
+                }
+            }
+        }
+    }
+
     // fundidos de cabeza y cola de la BOBINA entera
     let cabeza = (payload["project"]["fadeHead"].as_f64().unwrap_or(0.0) * fps).round() as usize;
     let cola = (payload["project"]["fadeTail"].as_f64().unwrap_or(0.0) * fps).round() as usize;
@@ -460,6 +560,10 @@ pub fn tramos(renglones: &[Renglon]) -> Vec<Tramo> {
     for (i, r) in renglones.iter().enumerate() {
         let mut f = vec![r.fuente_a];
         if r.fuente_b != NINGUNA { f.push(r.fuente_b); }
+        // LA CAPA ES DEPENDENCIA: sin esto, la caché fina daba por bueno un
+        // tramo viejo después de mover o recolorear la capa que lo cruza.
+        if r.fuente_c != NINGUNA { f.push(r.fuente_c); }
+        if r.fuente_d != NINGUNA { f.push(r.fuente_d); }
         match v.last_mut() {
             Some(t) if t.fuentes == f => t.cuantos += 1,
             _ => v.push(Tramo { desde: i, cuantos: 1, fuentes: f }),
@@ -585,11 +689,272 @@ pub fn matriz(e: &Encuadre, sw: f32, sh: f32, pw: f32, ph: f32)
     ([m.a, m.b, m.c, m.d], [m.tx, m.ty, taps(fx), taps(fy)], paso)
 }
 
-/// la matriz de una fuente del plan (el atajo que usan los motores)
+// ── EL APLANADO DE BOBINAS ANIDADAS (CAPAS §8) ───────────────────────────
+//
+// Una bobina dentro de otra NO llega al motor: aquí se sustituye el clip
+// anidado por los clips reales de la hija —recortados a su ventana, con su
+// receta y con la matriz compuesta—, y sus capas y su música se desplazan al
+// tiempo del padre. El motor revela clips normales y no sabe que hubo
+// anidamiento; la preview resuelve por su lado con el mismo modelo.
+//
+// `carga` devuelve el PAYLOAD de la bobina hija por su clave (quien llama
+// decide de dónde: la app de sus subbobinas, el shell de un fichero, los
+// tests de un mapa). `dims` da el ancho y alto de un fichero de material,
+// que hacen falta para componer la matriz interior.
+
+/// aplana todos los clips con `anidada` del payload. Devuelve cuántos
+/// aplanó. Profundidad máxima 3 y guarda de ciclos por clave.
+pub fn aplana_anidadas(payload: &mut Value,
+                       carga: &dyn Fn(&str) -> Option<Value>,
+                       dims: &dyn Fn(&str) -> Option<(f32, f32)>)
+    -> Result<usize, String>
+{
+    let mut vistos: Vec<String> = Vec::new();
+    aplana_nivel(payload, carga, dims, 0, &mut vistos)
+}
+
+fn aplana_nivel(payload: &mut Value,
+                carga: &dyn Fn(&str) -> Option<Value>,
+                dims: &dyn Fn(&str) -> Option<(f32, f32)>,
+                hondo: usize, vistos: &mut Vec<String>)
+    -> Result<usize, String>
+{
+    if hondo > 3 { return Err("bobinas anidadas a más de 3 niveles".into()); }
+    let fps = payload["project"]["fps"].as_f64().unwrap_or(25.0).max(1.0);
+    let pw = payload["project"]["w"].as_f64().unwrap_or(1920.0) as f32;
+    let ph = payload["project"]["h"].as_f64().unwrap_or(1080.0) as f32;
+    let clips = payload["clips"].as_array().cloned().unwrap_or_default();
+    if !clips.iter().any(|c| c["anidada"].as_str().is_some()) { return Ok(0); }
+
+    // LOS ARRANQUES en la bobina padre, con la MISMA cuenta que `compila`:
+    // duración redondeada a fotogramas y el solape de los encadenados. Sin
+    // esto las capas y la música de la hija caerían corridas.
+    let dur_de = |c: &Value| -> f64 {
+        let v = c["speed"].as_f64().unwrap_or(1.0).clamp(-8.0, 8.0);
+        let d = c["out"].as_f64().unwrap_or(0.0) - c["in"].as_f64().unwrap_or(0.0);
+        let d = if v.abs() < 0.02 { d } else { d / v.abs() };
+        ((d * fps).round().max(1.0)) / fps
+    };
+    let mut arranques = Vec::with_capacity(clips.len());
+    let mut t0 = 0.0f64;
+    for (k, c) in clips.iter().enumerate() {
+        arranques.push(t0);
+        let solape = if k + 1 < clips.len() {
+            c["fade"].as_f64().unwrap_or(0.0).max(0.0)
+        } else { 0.0 };
+        t0 += (dur_de(c) - solape).max(0.0);
+    }
+
+    let mut nuevos: Vec<Value> = Vec::new();
+    let mut capas_extra: Vec<Value> = Vec::new();
+    let mut audio_extra: Vec<Value> = Vec::new();
+    let mut cuantas = 0usize;
+
+    for (k, c) in clips.iter().enumerate() {
+        let Some(clave) = c["anidada"].as_str().map(String::from) else {
+            nuevos.push(c.clone());
+            continue;
+        };
+        if vistos.contains(&clave) {
+            return Err(format!("la bobina «{clave}» se contiene a sí misma"));
+        }
+        let Some(mut hija) = carga(&clave) else {
+            return Err(format!("no encuentro la bobina anidada «{clave}»"));
+        };
+        vistos.push(clave.clone());
+        aplana_nivel(&mut hija, carga, dims, hondo + 1, vistos)?;
+        vistos.pop();
+        cuantas += 1;
+
+        let cw = hija["project"]["w"].as_f64().unwrap_or(1920.0) as f32;
+        let ch = hija["project"]["h"].as_f64().unwrap_or(1080.0) as f32;
+        // la matriz EXTERIOR: lienzo padre → lienzo hijo (el encuadre que el
+        // autor le puso al clip anidado, tratando a la hija como material)
+        let enc_out = Encuadre::de_json(&c["tf"], 0);
+        let (oa, ob, _) = matriz(&enc_out, cw, ch, pw, ph);
+        let fuera = (oa, ob);
+        // la VENTANA sobre la hija, en tiempo de bobina hija
+        let v_in = c["in"].as_f64().unwrap_or(0.0).max(0.0);
+        let v_out = c["out"].as_f64().unwrap_or(0.0).max(v_in);
+        if c["speed"].as_f64().unwrap_or(1.0) != 1.0 {
+            // v1: el clip anidado va a ×1 (se avisa en vez de mentir)
+            eprintln!("   ⚠ clip anidado «{clave}» con velocidad ≠ 1: se trata como ×1");
+        }
+        let pos_padre = arranques[k];
+
+        // compone la matriz de un elemento de la hija con la exterior
+        let compon = |el: &Value| -> Option<Value> {
+            let dentro: ([f32; 4], [f32; 4]) = if let Some(m) = mat_de_json(&el["mat"]) {
+                ([m[0], m[1], m[3], m[4]], [m[2], m[5], 0.0, 0.0])
+            } else {
+                let (fw, fh) = dims(el["file"].as_str().unwrap_or(""))?;
+                let e = Encuadre::de_json(&el["tf"],
+                                          el["cuartos"].as_u64().unwrap_or(0) as u8);
+                let (ia, ib, _) = matriz(&e, fw, fh, cw, ch);
+                (ia, ib)
+            };
+            let m = compon_mat(dentro, fuera);
+            Some(serde_json::json!(m.to_vec()))
+        };
+
+        // ── los clips de la hija, recortados a la ventana ────────────────
+        let hijos = hija["clips"].as_array().cloned().unwrap_or_default();
+        let mut acc = 0.0f64;
+        let mut primero = true;
+        let n_antes = nuevos.len();
+        for hc in &hijos {
+            let d = {
+                let v = hc["speed"].as_f64().unwrap_or(1.0).clamp(-8.0, 8.0);
+                let d = hc["out"].as_f64().unwrap_or(0.0) - hc["in"].as_f64().unwrap_or(0.0);
+                if v.abs() < 0.02 { d } else { d / v.abs() }
+            };
+            let (ini, fin) = (acc, acc + d);
+            acc = fin;
+            if fin <= v_in + 1e-9 || ini >= v_out - 1e-9 { continue; }
+            let mut nc = hc.clone();
+            // el recorte, EXACTO para las tres marchas: con v>0 un segundo de
+            // bobina son v de fuente desde la entrada; con v<0, desde la
+            // salida; congelado, la duración es literal
+            let corta_cabeza = (v_in - ini).max(0.0);
+            let corta_cola = (fin - v_out).max(0.0);
+            let v = hc["speed"].as_f64().unwrap_or(1.0).clamp(-8.0, 8.0);
+            let (mut hi, mut ho) = (hc["in"].as_f64().unwrap_or(0.0),
+                                    hc["out"].as_f64().unwrap_or(0.0));
+            if v.abs() < 0.02 {
+                ho -= corta_cabeza + corta_cola;      // el mismo fotograma, menos rato
+            } else if v > 0.0 {
+                hi += corta_cabeza * v;
+                ho -= corta_cola * v;
+            } else {
+                ho -= corta_cabeza * v.abs();
+                hi += corta_cola * v.abs();
+            }
+            nc["in"] = serde_json::json!(hi);
+            nc["out"] = serde_json::json!(ho.max(hi));
+            if let Some(m) = compon(hc) { nc["mat"] = m; }
+            if primero {
+                // el fundido a negro de entrada del clip anidado, si lo tenía
+                if let Some(f) = c["fadeIn"].as_f64() {
+                    if f > 0.0 { nc["fadeIn"] = serde_json::json!(f); }
+                }
+                primero = false;
+            }
+            nuevos.push(nc);
+        }
+        if nuevos.len() == n_antes {
+            return Err(format!("la ventana del clip anidado «{clave}» no coge nada"));
+        }
+        // el encadenado del clip anidado con el siguiente lo hereda su último
+        if let Some(ult) = nuevos.last_mut() {
+            if let Some(f) = c["fade"].as_f64() {
+                if f > 0.0 { ult["fade"] = serde_json::json!(f); }
+            }
+            if let Some(f) = c["fadeOut"].as_f64() {
+                if f > 0.0 { ult["fadeOut"] = serde_json::json!(f); }
+            }
+        }
+
+        // ── las capas de la hija, desplazadas y recortadas ───────────────
+        for cp in hija["clips2"].as_array().cloned().unwrap_or_default() {
+            let st = cp["start"].as_f64().unwrap_or(0.0);
+            let d = cp["out"].as_f64().unwrap_or(0.0) - cp["in"].as_f64().unwrap_or(0.0);
+            let (ini, fin) = (st, st + d.max(0.0));
+            if fin <= v_in + 1e-9 || ini >= v_out - 1e-9 { continue; }
+            let mut nc = cp.clone();
+            let corta_cabeza = (v_in - ini).max(0.0);
+            let corta_cola = (fin - v_out).max(0.0);
+            nc["in"] = serde_json::json!(cp["in"].as_f64().unwrap_or(0.0) + corta_cabeza);
+            nc["out"] = serde_json::json!((cp["out"].as_f64().unwrap_or(0.0) - corta_cola)
+                                          .max(cp["in"].as_f64().unwrap_or(0.0)));
+            nc["start"] = serde_json::json!(pos_padre + (ini.max(v_in) - v_in));
+            if let Some(m) = compon(&cp) { nc["mat"] = m; }
+            capas_extra.push(nc);
+        }
+
+        // ── la música de la hija, salvo que el clip anidado esté mudo ────
+        if !c["mute"].as_bool().unwrap_or(false) {
+            for au in hija["audio"].as_array().cloned().unwrap_or_default() {
+                let st = au["start"].as_f64().unwrap_or(0.0);
+                let d = au["out"].as_f64().unwrap_or(0.0) - au["in"].as_f64().unwrap_or(0.0);
+                let (ini, fin) = (st, st + d.max(0.0));
+                if fin <= v_in + 1e-9 || ini >= v_out - 1e-9 { continue; }
+                let mut na = au.clone();
+                let corta_cabeza = (v_in - ini).max(0.0);
+                let corta_cola = (fin - v_out).max(0.0);
+                na["in"] = serde_json::json!(au["in"].as_f64().unwrap_or(0.0) + corta_cabeza);
+                na["out"] = serde_json::json!((au["out"].as_f64().unwrap_or(0.0) - corta_cola)
+                                              .max(au["in"].as_f64().unwrap_or(0.0)));
+                na["start"] = serde_json::json!(pos_padre + (ini.max(v_in) - v_in));
+                audio_extra.push(na);
+            }
+        }
+    }
+
+    payload["clips"] = serde_json::json!(nuevos);
+    if !capas_extra.is_empty() {
+        let mut c2 = payload["clips2"].as_array().cloned().unwrap_or_default();
+        c2.extend(capas_extra);
+        payload["clips2"] = serde_json::json!(c2);
+    }
+    if !audio_extra.is_empty() {
+        let mut au = payload["audio"].as_array().cloned().unwrap_or_default();
+        au.extend(audio_extra);
+        payload["audio"] = serde_json::json!(au);
+    }
+    Ok(cuantas)
+}
+
+/// los seis números de una matriz explícita del payload, si vienen
+pub fn mat_de_json(v: &Value) -> Option<[f32; 6]> {
+    let a = v.as_array()?;
+    if a.len() != 6 { return None }
+    let mut m = [0.0f32; 6];
+    for (k, x) in a.iter().enumerate() { m[k] = x.as_f64()? as f32; }
+    Some(m)
+}
+
+/// la matriz de una fuente del plan (el atajo que usan los motores).
+///
+/// Si la fuente trae `mat` —el aplanado de una anidada—, manda la matriz
+/// explícita, y el paso del filtro de reducción y sus muestras se calculan
+/// de ella exactamente igual que se calculan de la compuesta.
 pub fn matriz_de(f: &Fuente, sw: f32, sh: f32, pw: f32, ph: f32)
     -> ([f32; 4], [f32; 4], [f32; 4])
 {
+    if let Some(m) = f.mat {
+        let (pw, ph) = (pw.max(1.0), ph.max(1.0));
+        let (sw, sh) = (sw.max(1.0), sh.max(1.0));
+        // m = [a, b, tx, c, d, ty]: uv de lienzo → uv de fuente
+        let paso = [m[0] / pw, m[3] / pw, m[1] / ph, m[4] / ph];
+        let fx = ((paso[0] * sw).powi(2) + (paso[1] * sh).powi(2)).sqrt();
+        let fy = ((paso[2] * sw).powi(2) + (paso[3] * sh).powi(2)).sqrt();
+        let taps = |f: f32| -> f32 {
+            if !f.is_finite() { return 1.0; }
+            f.ceil().clamp(1.0, 6.0)
+        };
+        return ([m[0], m[1], m[3], m[4]], [m[2], m[5], taps(fx), taps(fy)], paso);
+    }
     matriz(&f.enc, sw, sh, pw, ph)
+}
+
+/// COMPONER DOS AFINES del encuadre: primero `fuera` (uv del lienzo padre →
+/// uv del lienzo hijo) y luego `dentro` (uv del lienzo hijo → uv del
+/// fichero). Es el corazón del aplanado de anidadas: el resultado es una
+/// sola matriz que el motor aplica sin saber que hubo dos.
+pub fn compon_mat(dentro: ([f32; 4], [f32; 4]), fuera: ([f32; 4], [f32; 4]))
+    -> [f32; 6]
+{
+    let (a2, b2) = dentro;   // y = A2·x + b2
+    let (a1, b1) = fuera;    // x = A1·u + b1
+    // total = A2·A1·u + A2·b1 + b2
+    [
+        a2[0] * a1[0] + a2[1] * a1[2],
+        a2[0] * a1[1] + a2[1] * a1[3],
+        a2[0] * b1[0] + a2[1] * b1[1] + b2[0],
+        a2[2] * a1[0] + a2[3] * a1[2],
+        a2[2] * a1[1] + a2[3] * a1[3],
+        a2[2] * b1[0] + a2[3] * b1[1] + b2[1],
+    ]
 }
 
 #[cfg(test)]
@@ -804,6 +1169,187 @@ mod pruebas {
         let p = bobina_de(60.0, 30.0);
         assert_eq!(p.fuentes.len(), 1);
         assert!(p.renglones.iter().all(|r| r.fuente_b == NINGUNA));
+    }
+
+    // ── EL APLANADO DE ANIDADAS ──────────────────────────────────────
+
+    fn hija_simple() -> Value {
+        serde_json::json!({
+            "project": {"w": 1080, "h": 1920, "fps": 10.0},
+            "clips": [
+                {"file": "h1.mp4", "in": 2.0, "out": 5.0},
+                {"file": "h2.mp4", "in": 0.0, "out": 4.0},
+            ],
+            "clips2": [{"file": "rotulo.png", "start": 1.0, "in": 0.0, "out": 5.0}],
+            "audio": [{"file": "cancion.m4a", "start": 0.0, "in": 10.0, "out": 17.0}],
+        })
+    }
+
+    #[test]
+    fn la_anidada_se_aplana_con_su_ventana() {
+        let mut p = serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [
+                {"file": "a.mp4", "in": 0.0, "out": 2.0},
+                // la hija dura 7 s; la ventana coge del 1 al 6
+                {"anidada": "hija", "in": 1.0, "out": 6.0},
+                {"file": "b.mp4", "in": 0.0, "out": 1.0},
+            ],
+        });
+        let n = aplana_anidadas(&mut p,
+            &|k| if k == "hija" { Some(hija_simple()) } else { None },
+            &|_| Some((1920.0, 1080.0))).unwrap();
+        assert_eq!(n, 1);
+        let c = p["clips"].as_array().unwrap();
+        // a + (h1 recortado, h2 recortado) + b
+        assert_eq!(c.len(), 4);
+        // h1 dura 3 s (2..5): la ventana le quita 1 de cabeza → fuente 3..5
+        assert!((c[1]["in"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        assert!((c[1]["out"].as_f64().unwrap() - 5.0).abs() < 1e-9);
+        // h2 dura 4 s: la ventana acaba en 6 → le quita 1 de cola → 0..3
+        assert!((c[2]["out"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        // los aplanados llevan matriz compuesta
+        assert!(c[1]["mat"].is_array() && c[2]["mat"].is_array());
+        // la capa de la hija empezaba en 1,0 = justo donde abre la ventana:
+        // en el padre cae al arrancar el clip anidado (t = 2,0)
+        let c2 = p["clips2"].as_array().unwrap();
+        assert_eq!(c2.len(), 1);
+        assert!((c2[0]["start"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        // y la música: empezaba en 0, la ventana la recorta 1 s de cabeza
+        let au = p["audio"].as_array().unwrap();
+        assert!((au[0]["start"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!((au[0]["in"].as_f64().unwrap() - 11.0).abs() < 1e-9);
+        // y el resultado COMPILA con las capas dentro
+        let plan = compila(&p).unwrap();
+        assert!(plan.renglones.iter().any(|r| r.fuente_c != NINGUNA));
+    }
+
+    #[test]
+    fn el_ciclo_se_detecta() {
+        let mut p = serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"anidada": "a", "in": 0.0, "out": 1.0}],
+        });
+        let e = aplana_anidadas(&mut p,
+            &|k| Some(serde_json::json!({
+                "project": {"w": 1920, "h": 1080, "fps": 10.0},
+                "clips": [{"anidada": if k == "a" { "b" } else { "a" },
+                           "in": 0.0, "out": 1.0}],
+            })),
+            &|_| Some((1920.0, 1080.0)));
+        assert!(e.is_err(), "un ciclo a→b→a tiene que negarse");
+    }
+
+    #[test]
+    fn dos_niveles_componen_las_tres_matrices() {
+        // la nieta llena su lienzo; la hija la encoge a la mitad centrada; el
+        // padre la vuelve a encoger a la mitad. El centro queda en el centro y
+        // la esquina del lienzo padre cae FUERA del material (transparencia
+        // del conform, no del fichero).
+        let nieta = serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"file": "n.mp4", "in": 0.0, "out": 2.0}],
+        });
+        let hija = serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"anidada": "nieta", "in": 0.0, "out": 2.0,
+                       "tf": {"escala": [0.5, 0.5], "pos": [0.0, 0.0]}}],
+        });
+        let mut p = serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"anidada": "hija", "in": 0.0, "out": 2.0,
+                       "tf": {"escala": [0.5, 0.5], "pos": [0.0, 0.0]}}],
+        });
+        let hoja = nieta.clone();
+        aplana_anidadas(&mut p,
+            &move |k| match k { "hija" => Some(hija.clone()),
+                                "nieta" => Some(hoja.clone()), _ => None },
+            &|_| Some((1920.0, 1080.0))).unwrap();
+        let c = p["clips"].as_array().unwrap();
+        assert_eq!(c.len(), 1);
+        let m = mat_de_json(&c[0]["mat"]).expect("matriz compuesta");
+        // uv 0,5 → 0,5 (el centro no se mueve)
+        let cx = m[0] * 0.5 + m[1] * 0.5 + m[2];
+        let cy = m[3] * 0.5 + m[4] * 0.5 + m[5];
+        assert!((cx - 0.5).abs() < 1e-4 && (cy - 0.5).abs() < 1e-4, "{cx} {cy}");
+        // dos mitades = un cuarto: la esquina cae muy fuera de 0..1
+        let ex = m[0] * 0.0 + m[1] * 0.0 + m[2];
+        assert!(ex < -0.9, "esquina → {ex} (esperaba ≈ −1,5)");
+    }
+
+    // ── CAPAS Y ANIDADAS ─────────────────────────────────────────────
+
+    #[test]
+    fn la_capa_cubre_sus_fotogramas_y_solo_los_suyos() {
+        let p = compila(&serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"file": "base.mp4", "in": 0.0, "out": 4.0}],
+            "clips2": [{"file": "titulo.png", "start": 1.0, "in": 0.0, "out": 2.0,
+                        "fadeIn": 0.5, "fadeOut": 0.5}],
+        })).unwrap();
+        assert_eq!(p.fuentes.len(), 2);
+        assert!(p.fuentes[1].capa && p.fuentes[1].foto);
+        // fotogramas 0..9 sin capa; 10..29 con ella; 30..39 sin
+        assert!(p.renglones[..10].iter().all(|r| r.fuente_c == NINGUNA));
+        assert!(p.renglones[10..30].iter().all(|r| r.fuente_c == 1));
+        assert!(p.renglones[30..].iter().all(|r| r.fuente_c == NINGUNA));
+        // la rampa: a mitad del fundido de entrada, alfa ≈ 0,5; en el cuerpo, 1
+        let a = p.renglones[12].alfa_c;          // 0,25 s dentro de 0,5 s
+        assert!((a - 0.5).abs() < 0.11, "alfa de la rampa = {a}");
+        assert!((p.renglones[20].alfa_c - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dos_capas_gana_la_de_encima() {
+        let p = compila(&serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"file": "base.mp4", "in": 0.0, "out": 3.0}],
+            "clips2": [
+                {"file": "abajo.png",  "start": 0.0, "in": 0.0, "out": 3.0},
+                {"file": "arriba.png", "start": 1.0, "in": 0.0, "out": 1.0},
+            ],
+        })).unwrap();
+        assert_eq!(p.renglones[5].fuente_c, 1);   // sólo la de abajo
+        assert_eq!(p.renglones[5].fuente_d, NINGUNA);
+        // donde conviven: la de abajo en C y la de encima en D — LAS DOS
+        assert_eq!(p.renglones[15].fuente_c, 1);
+        assert_eq!(p.renglones[15].fuente_d, 2);
+        assert_eq!(p.renglones[25].fuente_c, 1);
+        assert_eq!(p.renglones[25].fuente_d, NINGUNA);
+    }
+
+    #[test]
+    fn la_capa_es_dependencia_de_su_tramo() {
+        let p = compila(&serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"file": "base.mp4", "in": 0.0, "out": 2.0}],
+            "clips2": [{"file": "t.png", "start": 1.0, "in": 0.0, "out": 1.0}],
+        })).unwrap();
+        let tr = tramos(&p.renglones);
+        assert_eq!(tr.len(), 2, "el tramo se parte donde entra la capa");
+        assert!(tr[1].fuentes.contains(&1),
+                "sin la capa en las dependencias, la caché mentiría");
+    }
+
+    #[test]
+    fn la_matriz_explicita_manda_y_compone_bien() {
+        // dentro: identidad · fuera: escala ×2 centrada → el total debe ser
+        // exactamente la afín de fuera
+        let dentro = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]);
+        let fuera = ([0.5, 0.0, 0.0, 0.5], [0.25, 0.25, 0.0, 0.0]);
+        let m = compon_mat(dentro, fuera);
+        assert_eq!(&m[..], &[0.5, 0.0, 0.25, 0.0, 0.5, 0.25]);
+        // y matriz_de con mat aplicada a una fuente: el centro va al centro
+        let f = Fuente {
+            fichero: "x.mp4".into(), hueco: false, prefs: Value::Null,
+            lut_in: None, lut: None, enc: Encuadre::limpio(0), veloc: 1.0,
+            foto: false, capa: false, mat: Some(m),
+        };
+        let (a, b, _) = matriz_de(&f, 1920.0, 1080.0, 1920.0, 1080.0);
+        let (u, v) = (0.5f32, 0.5f32);
+        let x = a[0] * u + a[1] * v + b[0];
+        let y = a[2] * u + a[3] * v + b[1];
+        assert!((x - 0.5).abs() < 1e-6 && (y - 0.5).abs() < 1e-6, "{x} {y}");
     }
 
     #[test]

@@ -19,22 +19,11 @@ segundo— y calla el clip para que no suene dos veces. Menú «Desacoplar el
 sonido» y ⇧D. A partir de ahí es material: se mueve, se corta con la cuchilla
 y tiene su nivel. El revelado ya respetaba `mute` por clip.
 
-▢ **16. Títulos y textos**, con **su propia pista de vídeo** encima. Lo único
-que queda de la lista, y no está a medias a propósito.
-
-Hoy `titulo::crea` rasteriza el texto a un PNG y entra como **cartón**: ocupa
-el plano entero. Para que se superponga hace falta una segunda pista de vídeo
-de verdad, y el camino está estudiado:
-
-- el truco está en que **el alfa por píxel puede viajar por donde ya viaja el
-  peso**. El pase devuelve `vec4(graded, P.peso)` y la mezcla es por src-alpha:
-  si para una fuente RGBA devolviera `vec4(graded, P.peso * alfa_del_píxel)`,
-  la composición sale **sin tocar nada del montaje de mezcla**;
-- hace falta: un tercer hueco en el renglón (`fuente_c`), que la foto
-  residente se cargue como RGBA en vez de Y/UV, una rama en los dos shaders,
-  y el tercer dibujo en los dos motores;
-- son seis ficheros y una recompilación de Windows para poder verlo. No se
-  entrega sin eso: media pista de vídeo es peor que ninguna.
+✅ **16. Títulos y textos con su propia pista de vídeo** — hecho como LA CAPA
+(CAPAS.md): un carril encima de la bobina que acepta rótulos y fotos CON su
+alfa por píxel y vídeo (PiP) con encuadre, fundidos de entrada y salida, y
+hasta dos compuestas a la vez. Y de propina: **bobinas anidadas** (una bobina
+dentro de otra, aplanada al revelar con las matrices compuestas).
 
 ✅ **5. La cuchilla también corta la música.** Con una pista elegida, la
 cuchilla muerde la música; si no, el vídeo. La herramienta es la misma.

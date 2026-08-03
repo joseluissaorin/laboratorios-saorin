@@ -450,6 +450,45 @@ pub struct Renderer {
     pub grain: Texture,
     pub shutter: f32,
     pub weave_amount: f32,
+    /// el 1×1 blanco que ata el hueco de la capa RGBA cuando no hay capa
+    pub blanco: Texture,
+}
+
+/// el 1×1 RGBA de repuesto (blanco opaco): Metal quiere todos los huecos
+/// atados aunque el shader no los lea
+pub fn tex_blanca(device: &Device) -> Texture {
+    let d = TextureDescriptor::new();
+    d.set_width(1);
+    d.set_height(1);
+    d.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+    d.set_usage(MTLTextureUsage::ShaderRead);
+    d.set_storage_mode(MTLStorageMode::Shared);
+    let t = device.new_texture(&d);
+    t.replace_region(MTLRegion::new_2d(0, 0, 1, 1), 0,
+                     [255u8, 255, 255, 255].as_ptr() as *const _, 4);
+    t
+}
+
+/// UNA CAPA RGBA RESIDENTE (CAPAS §5): la foto o el rótulo con su alfa,
+/// subidos una vez
+pub fn capa_rgba(device: &Device, ruta: &std::path::Path)
+    -> anyhow::Result<Texture>
+{
+    // el crate del motor lleva `image` directo (plan.rs entra por ruta, no
+    // como crate): la misma cuenta que foto::rgba, aquí mismo
+    let img = image::open(ruta)?.to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    let datos = img.into_raw();
+    let d = TextureDescriptor::new();
+    d.set_width(w as u64);
+    d.set_height(h as u64);
+    d.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+    d.set_usage(MTLTextureUsage::ShaderRead);
+    d.set_storage_mode(MTLStorageMode::Shared);
+    let t = device.new_texture(&d);
+    t.replace_region(MTLRegion::new_2d(0, 0, w as u64, h as u64), 0,
+                     datos.as_ptr() as *const _, (w * 4) as u64);
+    Ok(t)
 }
 
 impl Renderer {
@@ -480,6 +519,15 @@ impl Renderer {
     /// una copia con doble exposición.
     pub fn revela_en(&self, cmd: &CommandBufferRef, t_y: &Texture, t_uv: &Texture,
                      params: &GradeParams, lut_a: &Texture, lut_b: &Texture) {
+        self.revela_capa(cmd, t_y, t_uv, params, lut_a, lut_b, None)
+    }
+
+    /// el mismo pase, con la textura RGBA de una capa (CAPAS §5). El camino
+    /// sin capa le ata un 1×1 de repuesto: el shader no la lee con
+    /// src_mode < 3, pero Metal quiere TODOS los huecos atados.
+    pub fn revela_capa(&self, cmd: &CommandBufferRef, t_y: &Texture, t_uv: &Texture,
+                       params: &GradeParams, lut_a: &Texture, lut_b: &Texture,
+                       rgba: Option<&Texture>) {
         let gpu = &self.gpu;
         // con obturador el revelado escribe DIRECTAMENTE la historia nueva
         // (h_b) leyendo la vieja (h_a): un pase menos y un búfer 4K menos de
@@ -492,15 +540,18 @@ impl Renderer {
                                params as *const _ as *const _);
         enc.set_fragment_texture(0, Some(t_y));
         enc.set_fragment_texture(1, Some(t_uv));
+        let rgba = rgba.unwrap_or(&self.blanco);
         if self.pipes.uno {
             // el revelado traducido del WGSL es BIPLANAR puro: no tiene el
             // hueco `tVideo` que sí lleva el MSL de la casa, así que todo lo
-            // que va detrás sube un puesto
+            // que va detrás sube un puesto. Con la capa, el reparto por orden
+            // de binding es tY, tUV, lutA, lutB, hist, RGBA.
             enc.set_fragment_texture(2, Some(lut_a));
             enc.set_fragment_texture(3, Some(lut_b));
             enc.set_fragment_texture(4, Some(&self.targets.h_a));
+            enc.set_fragment_texture(5, Some(rgba));
         } else {
-            enc.set_fragment_texture(2, Some(t_uv)); // dummy: tVideo no se lee con src_mode=0
+            enc.set_fragment_texture(2, Some(rgba)); // tVideo: la capa RGBA
             enc.set_fragment_texture(3, Some(lut_a));
             enc.set_fragment_texture(4, Some(lut_b));
             enc.set_fragment_texture(5, Some(&self.targets.h_a));

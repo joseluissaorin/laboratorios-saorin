@@ -28,6 +28,9 @@ struct Puesto {
     /// no hay nada que decodificar, así que la bobina con fotos deja de caer
     /// al camino viejo (que funcionaba, pero era tres veces más lento).
     foto: Option<(metal::Texture, metal::Texture)>,
+    /// LA CAPA RGBA residente (CAPAS §5): rótulos y fotos de la capa, con su
+    /// alfa. Sólo la llevan las fuentes con `capa` y `foto`.
+    capa_rgba: Option<metal::Texture>,
     grade: GradeParams,
     comp: CompParams,
     shutter: f32,
@@ -66,21 +69,31 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     for f in &plan.fuentes {
         let lut_a = pide_lut(f.lut_in.as_deref(), "entrada", &gpu);
         let lut_b = pide_lut(f.lut.as_deref(), "color", &gpu);
-        let (cine, foto) = if f.hueco {
-            (None, None)
+        let (cine, foto, capa_rgba) = if f.hueco {
+            (None, None, None)
+        } else if f.foto && f.capa {
+            // UNA CAPA con foto o rótulo: RGBA residente, CON su alfa —
+            // que es de lo que vive una capa (CAPAS §5)
+            let t = crate::metal_pipe::capa_rgba(&gpu.device,
+                                                 std::path::Path::new(&f.fichero))
+                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?;
+            eprintln!("   capa RGBA residente: {} ({}×{})",
+                      f.fichero, t.width(), t.height());
+            (None, None, Some(t))
         } else if f.foto {
             let (ty, tuv, fw, fh) = foto_residente(&gpu.device,
                                                    std::path::Path::new(&f.fichero))
                 .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?;
             eprintln!("   foto residente: {} ({fw}×{fh})", f.fichero);
-            (None, Some((ty, tuv)))
+            (None, Some((ty, tuv)), None)
         } else {
             (Some(Fuente::abre(std::path::Path::new(&f.fichero))
-                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?), None)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?), None, None)
         };
-        let (sw, sh) = match (&cine, &foto) {
-            (Some(c), _) => { let i = c.info(); (i.0 as f32, i.1 as f32) }
-            (_, Some((ty, _))) => (ty.width() as f32, ty.height() as f32),
+        let (sw, sh) = match (&cine, &foto, &capa_rgba) {
+            (Some(c), _, _) => { let i = c.info(); (i.0 as f32, i.1 as f32) }
+            (_, Some((ty, _)), _) => (ty.width() as f32, ty.height() as f32),
+            (_, _, Some(t)) => (t.width() as f32, t.height() as f32),
             _ => (pw as f32, ph as f32),
         };
         let (a, b, paso) = plan::matriz_de(f, sw, sh, pw as f32, ph as f32);
@@ -99,12 +112,14 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
                  prefs_f(p, "ndGuard", 0.42).clamp(0.02, 1.0)],
             matriz: match p["matriz"].as_str().unwrap_or("709") {
                 "2020" | "bt2020" => 1, "601" | "bt601" => 2, _ => 0 },
+            // la semántica de capa (CAPAS §4): 2 = vídeo capa, 3 = RGBA capa
+            src_mode: if f.capa { if f.foto { 3 } else { 2 } } else { 0 },
             ..Default::default()
         };
         g.lut_na = lut_a.width() as u32;
         g.lut_nb = lut_b.width() as u32;
         puestos.push(Puesto {
-            cine, foto, grade: g, comp: comp_de(p, prefs_f),
+            cine, foto, capa_rgba, grade: g, comp: comp_de(p, prefs_f),
             shutter: prefs_f(p, "shutter", 0.0), weave: prefs_f(p, "weave", 0.0),
             lut_a, lut_b,
         });
@@ -125,6 +140,7 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
         lut_a: puestos[0].lut_a.clone(), lut_b: puestos[0].lut_b.clone(),
         grain: grain.clone(), shutter: puestos[0].shutter,
         weave_amount: puestos[0].weave,
+        blanco: crate::metal_pipe::tex_blanca(&gpu.device),
     };
 
     // el hilo del codificador: la GPU y VideoToolbox trabajan a la vez
@@ -177,7 +193,8 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     // Y es lo que hace baratas las juntas: durante un encadenado hacen falta
     // dos fuentes a la vez, pero el hilo lleva ventaja acumulada del clip que
     // se está yendo, así que el pico se amortiza en vez de dar un tirón.
-    struct Servido { ren: crate::plan::Renglon, a: Option<Cuadro>, b: Option<Cuadro> }
+    struct Servido { ren: crate::plan::Renglon, a: Option<Cuadro>, b: Option<Cuadro>,
+                     c: Option<Cuadro>, d: Option<Cuadro> }
     unsafe impl Send for Servido {}
     let total = plan.renglones.len();
     let renglones = plan.renglones.clone();
@@ -190,7 +207,14 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
             let b = if ren.fuente_b != NINGUNA {
                 cines[ren.fuente_b as usize].as_mut().and_then(|c| c.en(ren.t_b))
             } else { None };
-            if ftx.send(Servido { ren: *ren, a, b }).is_err() { break; }
+            // LA CAPA: si es vídeo, su fotograma; una foto no decodifica nada
+            let c = if ren.fuente_c != NINGUNA {
+                cines[ren.fuente_c as usize].as_mut().and_then(|x| x.en(ren.t_c))
+            } else { None };
+            let d = if ren.fuente_d != NINGUNA {
+                cines[ren.fuente_d as usize].as_mut().and_then(|x| x.en(ren.t_d))
+            } else { None };
+            if ftx.send(Servido { ren: *ren, a, b, c, d }).is_err() { break; }
         }
     });
 
@@ -286,6 +310,38 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
                     texs.push((ty, tuv));
                 }
                 vivos.push(c);
+            }
+        }
+
+        // ── LA CAPA (CAPAS §5): un dibujo más, encima de A y B ───────
+        // `peso = alfa_c` (los fundidos de la capa); si es RGBA el alfa por
+        // píxel lo multiplica el shader. La trampa del destino: con
+        // obturador, A y B escriben en h_b y la capa tiene que caer AHÍ
+        // MISMO — así que lleva el pad0 del que manda (elige destino) con
+        // pad1 = 1 (no arrastra historia: un rótulo no es luz de escena).
+        for (fk, tk, ak, cua) in [
+            (ren.fuente_c, ren.t_c, ren.alfa_c, servido.c),
+            (ren.fuente_d, ren.t_d, ren.alfa_d, servido.d),
+        ] {
+            let _ = tk;
+            if fk == NINGUNA { continue }
+            let ic = fk as usize;
+            let mut g = puestos[ic].grade;
+            g.peso = ak;
+            g.pad0 = puestos[manda].shutter;
+            g.pad1 = 1.0;
+            if let Some(t_rgba) = puestos[ic].capa_rgba.clone() {
+                r.revela_capa(cmd, &sin_imagen.0, &sin_imagen.1, &g,
+                              &puestos[ic].lut_a.clone(),
+                              &puestos[ic].lut_b.clone(), Some(&t_rgba));
+            } else if let Some(cua) = cua {
+                if let Some((ty, tuv)) = importa(&tex_cache, cua.pb) {
+                    r.revela_en(cmd, &ty, &tuv, &g,
+                                &puestos[ic].lut_a.clone(),
+                                &puestos[ic].lut_b.clone());
+                    texs.push((ty, tuv));
+                }
+                vivos.push(cua);
             }
         }
 

@@ -111,3 +111,12 @@ mod pruebas {
         assert!(!es_foto(Path::new("clip.mp4")));
     }
 }
+
+/// LA FOTO DE UNA CAPA, en RGBA de 8 bits con su alfa (CAPAS §5). La versión
+/// planar de arriba tira el alfa —el camino base no lo necesita—; una capa
+/// vive de él: es lo que deja ver el fotograma de abajo.
+pub fn rgba(ruta: &std::path::Path) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let img = image::open(ruta)?.to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    Ok((w, h, img.into_raw()))
+}

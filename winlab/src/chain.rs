@@ -109,6 +109,13 @@ pub struct WinChain {
     pub shutter: f32,
     pub weave: f32,
     pub grade_buf: wgpu::Buffer,
+    /// UN BÚFER POR CARRIL (A, B, C, D). Con uno solo, los dos `write_buffer`
+    /// de una junta caían en el mismo sitio y AMBOS dibujos se hacían con la
+    /// receta del último: el lado A de un encadenado llevaba el encuadre y el
+    /// peso del B. Con capas serían cuatro escrituras pisándose.
+    pub grade_bufs: [wgpu::Buffer; 4],
+    /// el 1×1 blanco que ata el hueco de la capa cuando no hay capa
+    pub blanco: wgpu::TextureView,
     pub comp_buf: wgpu::Buffer,
     pub small_u: wgpu::Buffer,
     // bind groups cacheados: clave = which<<16 | slot<<1 | paridad
@@ -149,6 +156,9 @@ uniform_entry(0, params::bytes_uniforme::<params::GradeU>()),
             tex3d_entry(3), tex3d_entry(4),
             sampler_entry(5),
             tex_filter_entry(6),
+            // LA CAPA RGBA (CAPAS §4): rótulos y fotos con su alfa. Con
+            // src_mode < 3 el shader no la lee; lleva un 1×1 de repuesto.
+            tex_filter_entry(7),
         ], &[ct_mezcla(TEN)]);
         let down = make_pass(device, include_str!("../../core/src/shaders/down.wgsl"), &[
             uniform_entry(0, 16), tex_filter_entry(1), sampler_entry(2),
@@ -261,6 +271,30 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
         let shutter = params::f(prefs, "shutter", 0.0);
         let weave = params::f(prefs, "weave", 0.0);
         let grade_buf = uniform_buffer(device, bytemuck::bytes_of(&grade_u));
+        let grade_bufs = [
+            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
+            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
+            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
+            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
+        ];
+        let blanco = {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capa blanca"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &[255u8, 255, 255, 255],
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
+            t.create_view(&Default::default())
+        };
         let comp_buf = uniform_buffer(device, bytemuck::bytes_of(&comp_u));
         let small_u = uniform_buffer(device, &[0u8; 16]);
 
@@ -268,7 +302,7 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
             grade, down, blur, accum, comp, pack_y, pack_uv,
             targets, out_rgb, samp, samp_rep, lut_a, lut_b, grain_view,
             grade_u, comp_u, shutter, weave,
-            grade_buf, comp_buf, small_u, w, h,
+            grade_buf, grade_bufs, blanco, comp_buf, small_u, w, h,
             bg_cache: Default::default(),
         })
     }
@@ -295,19 +329,44 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
         carril: u64,
         primero: bool,
     ) {
-        queue.write_buffer(&self.grade_buf, 0, bytemuck::bytes_of(gu));
-        let par = if primero { 0u64 } else { 1u64 };
-        let _ = par;
+        self.revela_capa(device, queue, enc, t_y, t_uv, gu, luts, slot, carril,
+                         primero, None, 0)
+    }
+
+    /// el mismo pase, con la textura RGBA de una capa (CAPAS §5)
+    #[allow(clippy::too_many_arguments)]
+    pub fn revela_capa(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        t_y: &wgpu::TextureView,
+        t_uv: &wgpu::TextureView,
+        gu: &GradeU,
+        luts: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
+        slot: u64,
+        carril: u64,
+        primero: bool,
+        rgba: Option<&wgpu::TextureView>,
+        fuente: u64,
+    ) {
+        // CADA CARRIL SU BÚFER: los write_buffer van todos antes del submit y
+        // con uno compartido el último pisaba a los demás (ver el campo)
+        let buf = &self.grade_bufs[(carril as usize).min(3)];
+        queue.write_buffer(buf, 0, bytemuck::bytes_of(gu));
         let (la, lb) = luts.unwrap_or((&self.lut_a.1, &self.lut_b.1));
-        // la clave lleva el carril: dos fuentes vivas a la vez en una junta
-        let gkey = (0x20u64 << 16) | (slot << 4) | (carril << 1)
+        let rgba = rgba.unwrap_or(&self.blanco);
+        // la clave lleva el carril Y LA FUENTE: dos fotos distintas por el
+        // mismo carril y slot reutilizaban el bind group de la primera y la
+        // segunda salía con la textura equivocada
+        let gkey = (0x20u64 << 40) | (fuente << 24) | (slot << 8) | (carril << 1)
                    | if primero { 1 } else { 0 };
         if !self.bg_cache.contains_key(&gkey) {
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.grade.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.grade_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(t_y) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(t_uv) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(la) },
@@ -315,12 +374,13 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.samp) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(
                         if primero { &self.targets.h_a.view } else { &self.targets.h_b.view }) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(rgba) },
                 ],
             });
             self.bg_cache.insert(gkey, bg);
         }
         let bg = self.bg_cache[&gkey].clone();
-        // el lado A limpia el lienzo (peso 1 = sustituye); el B se mezcla
+        // el lado A limpia el lienzo (peso 1 = sustituye); el resto se mezcla
         run_pass(enc, &self.grade, &bg, &[&self.targets.h_b.view]);
     }
 

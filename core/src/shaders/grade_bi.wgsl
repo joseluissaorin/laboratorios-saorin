@@ -38,6 +38,9 @@ struct GradeU {
 @group(0) @binding(4) var tLutB: texture_3d<f32>;
 @group(0) @binding(5) var samp: sampler;
 @group(0) @binding(6) var tHist: texture_2d<f32>;   // historia del obturador
+// LA CAPA RGBA (CAPAS §4): rótulos y fotos con transparencia. Sólo se lee con
+// src_mode = 3; el resto del tiempo lleva atado un 1×1 blanco de repuesto.
+@group(0) @binding(7) var tRGBA: texture_2d<f32>;
 
 /// LA GELATINA, POR TETRAEDROS y no por el cubo entero.
 ///
@@ -236,7 +239,22 @@ fn a_rgb(Y: f32, U: f32, V: f32) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let enc = encuadra(in.uv);
+  // ── LA SEMÁNTICA DE CAPA (src_mode ≥ 2) ─────────────────────────────
+  // Una capa se COMPONE encima: fuera de su encuadre no hay letterbox negro,
+  // hay TRANSPARENCIA (alfa 0), que es lo que deja ver el fotograma de abajo.
+  if (P.src_mode >= 2u && enc.z < 0.0) { return vec4(0.0, 0.0, 0.0, 0.0); }
   if (enc.z < 0.0) { return vec4(0.0, 0.0, 0.0, P.peso); }
+  // ── RGBA (src_mode 3): rótulos y fotos con su alfa por píxel ────────
+  // Sin matriz YUV y sin corrector ND: un rótulo no pasó por la cámara. El
+  // alfa del píxel multiplica al peso del pase (los fundidos de la capa).
+  if (P.src_mode == 3u) {
+    let px = textureSampleLevel(tRGBA, samp, enc.xy, 0.0);
+    var c = max(px.rgb, vec3(0.0));
+    c = c * exp2(P.gain);
+    c = clamp(c, vec3(0.0), vec3(1.0));
+    if (P.lut_b_on == 1u) { c = clamp(lut3(tLutB, P.lut_nb, c), vec3(0.0), vec3(1.0)); }
+    return vec4(c, P.peso * px.a);
+  }
   let yuv = muestrea(enc.xy);
   // ── DE CÓDIGO A SEÑAL, sin depender de la profundidad de bits ────────
   // La cuenta de antes era `(código − 64) / 876`, que sólo vale si la fuente

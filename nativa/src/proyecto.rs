@@ -59,6 +59,10 @@ pub struct Clip {
     pub grupo: Option<u32>,
     /// el fichero no aparece: el clip se conserva y se avisa (§4)
     pub ausente: bool,
+    /// UNA BOBINA DENTRO DE OTRA (CAPAS §2): la clave de la hija. El clip es
+    /// una VENTANA sobre ella: `t_in`/`t_out` recortan en su línea de tiempo,
+    /// y por dentro la hija sigue siendo suya (editarla y volver refresca).
+    pub anidada: Option<String>,
 }
 
 impl Clip {
@@ -111,6 +115,45 @@ impl ClipAudio {
     pub fn entra(&self) -> f64 { (self.start + self.desfase).max(0.0) }
 }
 
+/// UNA CAPA (CAPAS §2): un clip COLOCADO encima de la bobina, no un eslabón
+/// de ella. Reutiliza `Clip` entero —encuadre, receta, gelatinas, velocidad,
+/// silencio— y añade lo que una capa necesita: dónde entra y sus fundidos.
+#[derive(Clone)]
+pub struct Capa {
+    pub c: Clip,
+    /// en qué segundo de la bobina entra
+    pub start: f64,
+    /// fundidos de ALFA de la propia capa (no a negro: a transparente)
+    pub fundido_in: f64,
+    pub fundido_out: f64,
+}
+
+impl Capa {
+    pub fn dur(&self) -> f64 { self.c.dur() }
+    pub fn fin(&self) -> f64 { self.start + self.dur() }
+    /// el alfa de la capa en el segundo `t` de la bobina (0 = no se ve)
+    pub fn alfa_en(&self, t: f64) -> f32 {
+        if t < self.start || t >= self.fin() { return 0.0 }
+        let dentro = t - self.start;
+        let mut a = 1.0f64;
+        if self.fundido_in > 0.001 { a = a.min(dentro / self.fundido_in); }
+        if self.fundido_out > 0.001 { a = a.min((self.dur() - dentro) / self.fundido_out); }
+        a.clamp(0.0, 1.0) as f32
+    }
+}
+
+/// UNA BOBINA HIJA ya cargada (CAPAS §2): lo que hace falta para resolver la
+/// preview y para aplanar el payload
+pub struct SubBobina {
+    pub clips: Vec<Clip>,
+    pub capas: Vec<Capa>,
+    pub audio: Vec<ClipAudio>,
+    pub w: u32,
+    pub h: u32,
+    pub fps: f64,
+    pub dur: f64,
+}
+
 /// el FORMATO del proyecto: la decisión creativa de primer orden.
 /// None = «del primer clip» (auto).
 #[derive(Clone, Debug, PartialEq)]
@@ -146,6 +189,11 @@ pub struct Proyecto {
     pub marcas: Vec<Marca>,
     /// la pista de música (bajo el vídeo)
     pub audio: Vec<ClipAudio>,
+    /// LA CAPA de vídeo (encima): clips colocados con su alfa (CAPAS §2). El
+    /// orden de la lista es el apilado: la última, encima.
+    pub capas: Vec<Capa>,
+    /// las bobinas hijas de los clips anidados, cargadas al abrir
+    pub subbobinas: std::collections::HashMap<String, SubBobina>,
     /// las palancas del margen: silenciar el sonido del vídeo / la música
     pub mudo_voz: bool,
     pub mudo_musica: bool,
@@ -571,6 +619,183 @@ pub fn crea_bobina(base: &Path, nombre: &str, aspecto: &str, fps: f64, alto: u32
     Ok(())
 }
 
+/// EL PAYLOAD de una bobina hija (CAPAS §8): lo que el aplanador del plan
+/// necesita para sustituir el clip anidado por los clips reales. Los nombres
+/// de gelatina van como ficheros (el shell los resuelve con su catálogo).
+pub fn payload_de_sub(sb: &SubBobina) -> serde_json::Value {
+    let nombre_lut = |p: &Option<PathBuf>| -> serde_json::Value {
+        match p.as_ref().and_then(|x| x.file_name()) {
+            Some(n) => serde_json::json!(n.to_string_lossy()),
+            None => serde_json::Value::Null,
+        }
+    };
+    let clip_json = |c: &Clip| -> serde_json::Value {
+        let mut o = serde_json::json!({
+            "file": c.ruta.to_string_lossy(),
+            "in": c.t_in, "out": c.t_out,
+            "fade": c.fade, "speed": c.speed,
+            "cuartos": c.cuartos_fichero,
+            "prefs": c.prefs.clone(),
+            "mute": c.mute,
+        });
+        if c.hueco { o["gap"] = serde_json::json!(true); }
+        if !c.enc.es_limpio(c.cuartos_fichero) { o["tf"] = c.enc.json(); }
+        o["lut_in"] = nombre_lut(&c.lut_in);
+        o["lut"] = nombre_lut(&c.lut_color);
+        if let Some(a) = &c.anidada { o["anidada"] = serde_json::json!(a); }
+        o
+    };
+    serde_json::json!({
+        "project": {"w": sb.w, "h": sb.h, "fps": sb.fps},
+        "clips": sb.clips.iter().map(clip_json).collect::<Vec<_>>(),
+        "clips2": sb.capas.iter().map(|cp| {
+            let mut o = clip_json(&cp.c);
+            o["start"] = serde_json::json!(cp.start);
+            if cp.fundido_in > 0.001 { o["fadeIn"] = serde_json::json!(cp.fundido_in); }
+            if cp.fundido_out > 0.001 { o["fadeOut"] = serde_json::json!(cp.fundido_out); }
+            o
+        }).collect::<Vec<_>>(),
+        "audio": sb.audio.iter().map(|a| serde_json::json!({
+            "file": a.ruta.to_string_lossy(), "in": a.t_in, "out": a.t_out,
+            "start": a.entra(), "gain": a.gain,
+            "fadeIn": a.fade_in, "fadeOut": a.fade_out,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// UNA BOBINA HIJA, cargada con el mismo lector que la madre. Un nivel para
+/// la preview; el máster aplana hasta tres (plan::aplana_anidadas).
+fn carga_sub(base: &Path, clave: &str, dir_in: &Path, dir_col: &Path)
+    -> Option<SubBobina>
+{
+    let pp = base.join("projects").join(format!("{clave}.json"));
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&pp).ok()?).ok()?;
+    let prefs_proy = v.get("prefs").cloned().unwrap_or(serde_json::json!({}));
+    let nom_in = v["lutEntrada"].as_str().unwrap_or("Directo · sin transformar.cube").to_string();
+    let nom_c = v["lutColor"].as_str().unwrap_or("Saorín · 65 puntos.cube").to_string();
+    let mut aus = Vec::new();
+    let clips = carga_clips_de(&v["clips"].as_array().cloned().unwrap_or_default(),
+                               base, dir_in, dir_col, &prefs_proy, &nom_in, &nom_c,
+                               &mut aus);
+    if clips.is_empty() { return None }
+    let capas_json = v["capas"].as_array().cloned().unwrap_or_default();
+    let capas_clips = carga_clips_de(&capas_json, base, dir_in, dir_col,
+                                     &prefs_proy, &nom_in, &nom_c, &mut aus);
+    let capas = capas_clips.into_iter().zip(capas_json.iter())
+        .map(|(c, j)| Capa {
+            c,
+            start: j["start"].as_f64().unwrap_or(0.0).max(0.0),
+            fundido_in: j["fadeIn"].as_f64().unwrap_or(0.0).max(0.0),
+            fundido_out: j["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
+        }).collect();
+    let mut audio = Vec::new();
+    for a in v["audio"].as_array().cloned().unwrap_or_default() {
+        let media = a["media"].as_str().unwrap_or("").to_string();
+        let ruta = resolver(base, &media);
+        if !ruta.is_file() { continue }
+        audio.push(ClipAudio {
+            media, ruta,
+            t_in: a["in"].as_f64().unwrap_or(0.0),
+            t_out: a["out"].as_f64().unwrap_or(0.0),
+            start: a["start"].as_f64().unwrap_or(0.0),
+            gain: a["gain"].as_f64().unwrap_or(0.0),
+            fade_in: a["fadeIn"].as_f64().unwrap_or(0.0),
+            fade_out: a["fadeOut"].as_f64().unwrap_or(0.0),
+            banda: Vec::new(),
+            mute: a["mute"].as_bool().unwrap_or(false),
+            pista: a["pista"].as_u64().unwrap_or(0).min(PISTAS_MUSICA as u64 - 1) as u8,
+            desfase: a["desfase"].as_f64().unwrap_or(0.0),
+        });
+    }
+    let dur: f64 = clips.iter().map(|c| c.dur()).sum();
+    let (w, h) = (v["project"]["w"].as_u64().unwrap_or(1920) as u32,
+                  v["project"]["h"].as_u64().unwrap_or(1080) as u32);
+    let fps = v["project"]["fps"].as_f64().filter(|f| *f > 1.0).unwrap_or(25.0);
+    Some(SubBobina { clips, capas, audio, w, h, fps, dur })
+}
+
+/// EL LECTOR DE CLIPS, uno solo (CAPAS §2): lo usan la bobina, las capas y
+/// las bobinas hijas. Antes este bucle vivía dentro de `cargar` y cualquier
+/// segundo consumidor habría tenido que copiarlo.
+#[allow(clippy::too_many_arguments)]
+fn carga_clips_de(arr: &[serde_json::Value], base: &Path,
+                  dir_in: &Path, dir_col: &Path,
+                  prefs_proy: &serde_json::Value,
+                  nom_in_proy: &str, nom_c_proy: &str,
+                  ausentes: &mut Vec<String>) -> Vec<Clip> {
+        let mut clips = Vec::new();
+        let mut ausentes: Vec<String> = Vec::new();
+        for c in arr.iter().cloned() {
+            let hueco = c["gap"].as_bool().unwrap_or(false);
+            let media = c["media"].as_str().unwrap_or("").to_string();
+            let (t_in, t_out) = if hueco {
+                (0.0, c["dur"].as_f64().unwrap_or(2.0))
+            } else {
+                (c["in"].as_f64().unwrap_or(0.0), c["out"].as_f64().unwrap_or(0.0))
+            };
+            let ruta = if hueco { PathBuf::new() } else { resolver(base, &media) };
+            // UN CLIP NO SE TIRA NUNCA. Antes, si su fichero no se resolvía,
+            // aquí había un `continue`: el clip desaparecía del montaje sin
+            // decir nada, y el autor perdía el trabajo sin enterarse. Ahora se
+            // conserva —con su corte, su receta y su sitio— y se marca como
+            // material ausente para que se pueda volver a enlazar.
+            let es_anidada = c["anidada"].as_str().is_some();
+            if !hueco && !es_anidada && !ruta.is_file() {
+                eprintln!("⚠ material ausente: «{media}» (el clip se conserva; \
+                           vuelve a importarlo para recuperar la imagen)");
+                ausentes.push(media.clone());
+            }
+            // el cuarto oscuro del clip: los del proyecto + lo suyo encima
+            let mut prefs = prefs_proy.clone();
+            if let (Some(base_obj), Some(propias)) = (prefs.as_object_mut(), c["prefs"].as_object()) {
+                for (k, val) in propias { base_obj.insert(k.clone(), val.clone()); }
+            }
+            let nom_in = c["lutEntrada"].as_str().unwrap_or(nom_in_proy);
+            let nom_c = c["lutColor"].as_str().unwrap_or(nom_c_proy);
+            // LA ORIENTACIÓN DEL FICHERO. Se guarda con el clip para no volver
+            // a abrir el contenedor en cada carga, pero si no está (bobinas de
+            // antes) se lee ahora: es lo que endereza el material de móvil.
+            let cuartos_fichero = c["cuartos"].as_u64().map(|q| (q % 4) as u8)
+                .unwrap_or_else(|| if hueco || es_anidada { 0 } else {
+                    filmlook_core::indice::sondea_orientado(&ruta).map(|x| x.4).unwrap_or(0)
+                });
+            // EL ENCUADRE: `tf` es el modelo de hoy; `transform` era el de
+            // antes (zoom + centro) y se convierte una vez al abrir.
+            let enc = if c["tf"].is_object() {
+                Encuadre::de_json(&c["tf"], cuartos_fichero)
+            } else if c["transform"].is_object() {
+                let z = c["transform"]["zoom"].as_f64().unwrap_or(1.0).max(0.05);
+                let cx = c["transform"]["cx"].as_f64().unwrap_or(0.5);
+                let cy = c["transform"]["cy"].as_f64().unwrap_or(0.5);
+                let mut e = Encuadre::limpio(cuartos_fichero);
+                e.escala = (z as f32, z as f32);
+                e.pos = (((0.5 - cx) * (z - 1.0)) as f32, ((0.5 - cy) * (z - 1.0)) as f32);
+                e
+            } else {
+                Encuadre::limpio(cuartos_fichero)
+            };
+            let ausente = !hueco && !es_anidada && !ruta.is_file();
+            clips.push(Clip {
+                media, ruta, t_in, t_out, hueco,
+                fade: c["fade"].as_f64().unwrap_or(0.0),
+                speed: c["speed"].as_f64().map(|v| v.clamp(-8.0, 8.0)).unwrap_or(1.0),
+                enc, cuartos_fichero,
+                prefs,
+                lut_in: busca_lut(&dir_in, nom_in),
+                lut_color: busca_lut(&dir_col, nom_c),
+                mute: c["mute"].as_bool().unwrap_or(false),
+                desfase: c["desfase"].as_f64().unwrap_or(0.0),
+                washi: c["washi"].as_u64().map(|w| (w % 4) as u8),
+                nota: c["nota"].as_str().unwrap_or("").to_string(),
+                grupo: c["grupo"].as_u64().map(|g| g as u32),
+                ausente,
+                anidada: c["anidada"].as_str().map(String::from),
+            });
+        }
+
+    clips
+}
+
 impl Proyecto {
     /// la estantería: lo que hay en media/ + lo referenciado en media.json
     /// el registro de material DE ESTA BOBINA: projects/<nombre>.media.json
@@ -685,6 +910,7 @@ impl Proyecto {
             lut_color: self.lut_color.clone(),
             mute: false, desfase: 0.0,
             washi: None, nota: String::new(), grupo: None, ausente: false,
+            anidada: None,
         }
     }
 
@@ -698,6 +924,7 @@ impl Proyecto {
             prefs: self.prefs.clone(), lut_in: None, lut_color: None,
             mute: false, desfase: 0.0,
             washi: None, nota: String::new(), grupo: None, ausente: false,
+            anidada: None,
         }
     }
 
@@ -857,9 +1084,27 @@ impl Proyecto {
             if let Some(w) = c.washi { o["washi"] = serde_json::json!(w); }
             if !c.nota.is_empty() { o["nota"] = serde_json::json!(c.nota); }
             if let Some(g) = c.grupo { o["grupo"] = serde_json::json!(g); }
+            if let Some(a) = &c.anidada { o["anidada"] = serde_json::json!(a); }
             o
         }).collect();
         v["clips"] = serde_json::json!(clips);
+        // LAS CAPAS (CAPAS §2): los mismos campos que un clip + colocación
+        let capas: Vec<serde_json::Value> = self.capas.iter().map(|cp| {
+            let c = &cp.c;
+            let mut o = serde_json::json!({
+                "media": c.media, "in": c.t_in, "out": c.t_out,
+                "start": cp.start,
+            });
+            if cp.fundido_in > 0.001 { o["fadeIn"] = serde_json::json!(cp.fundido_in); }
+            if cp.fundido_out > 0.001 { o["fadeOut"] = serde_json::json!(cp.fundido_out); }
+            if (c.speed - 1.0).abs() > 0.001 { o["speed"] = serde_json::json!(c.speed); }
+            if !c.enc.es_limpio(c.cuartos_fichero) { o["tf"] = c.enc.json(); }
+            if c.cuartos_fichero != 0 { o["cuartos"] = serde_json::json!(c.cuartos_fichero); }
+            if c.prefs != self.prefs { o["prefs"] = c.prefs.clone(); }
+            if c.mute { o["mute"] = serde_json::json!(true); }
+            o
+        }).collect();
+        v["capas"] = serde_json::json!(capas);
         let audio: Vec<serde_json::Value> = self.audio.iter().enumerate().map(|(i, a)| {
             serde_json::json!({ "id": i + 1, "media": a.media, "in": a.t_in,
                 "out": a.t_out, "start": a.start, "gain": a.gain,
@@ -914,73 +1159,24 @@ impl Proyecto {
         let nom_in_proy = v["lutEntrada"].as_str().unwrap_or("Directo · sin transformar.cube").to_string();
         let nom_c_proy = v["lutColor"].as_str().unwrap_or("Saorín · 65 puntos.cube").to_string();
 
-        let mut clips = Vec::new();
         let mut ausentes: Vec<String> = Vec::new();
-        for c in v["clips"].as_array().cloned().unwrap_or_default() {
-            let hueco = c["gap"].as_bool().unwrap_or(false);
-            let media = c["media"].as_str().unwrap_or("").to_string();
-            let (t_in, t_out) = if hueco {
-                (0.0, c["dur"].as_f64().unwrap_or(2.0))
-            } else {
-                (c["in"].as_f64().unwrap_or(0.0), c["out"].as_f64().unwrap_or(0.0))
-            };
-            let ruta = if hueco { PathBuf::new() } else { resolver(&base, &media) };
-            // UN CLIP NO SE TIRA NUNCA. Antes, si su fichero no se resolvía,
-            // aquí había un `continue`: el clip desaparecía del montaje sin
-            // decir nada, y el autor perdía el trabajo sin enterarse. Ahora se
-            // conserva —con su corte, su receta y su sitio— y se marca como
-            // material ausente para que se pueda volver a enlazar.
-            if !hueco && !ruta.is_file() {
-                eprintln!("⚠ material ausente: «{media}» (el clip se conserva; \
-                           vuelve a importarlo para recuperar la imagen)");
-                ausentes.push(media.clone());
-            }
-            // el cuarto oscuro del clip: los del proyecto + lo suyo encima
-            let mut prefs = prefs_proy.clone();
-            if let (Some(base_obj), Some(propias)) = (prefs.as_object_mut(), c["prefs"].as_object()) {
-                for (k, val) in propias { base_obj.insert(k.clone(), val.clone()); }
-            }
-            let nom_in = c["lutEntrada"].as_str().unwrap_or(&nom_in_proy);
-            let nom_c = c["lutColor"].as_str().unwrap_or(&nom_c_proy);
-            // LA ORIENTACIÓN DEL FICHERO. Se guarda con el clip para no volver
-            // a abrir el contenedor en cada carga, pero si no está (bobinas de
-            // antes) se lee ahora: es lo que endereza el material de móvil.
-            let cuartos_fichero = c["cuartos"].as_u64().map(|q| (q % 4) as u8)
-                .unwrap_or_else(|| if hueco { 0 } else {
-                    filmlook_core::indice::sondea_orientado(&ruta).map(|x| x.4).unwrap_or(0)
-                });
-            // EL ENCUADRE: `tf` es el modelo de hoy; `transform` era el de
-            // antes (zoom + centro) y se convierte una vez al abrir.
-            let enc = if c["tf"].is_object() {
-                Encuadre::de_json(&c["tf"], cuartos_fichero)
-            } else if c["transform"].is_object() {
-                let z = c["transform"]["zoom"].as_f64().unwrap_or(1.0).max(0.05);
-                let cx = c["transform"]["cx"].as_f64().unwrap_or(0.5);
-                let cy = c["transform"]["cy"].as_f64().unwrap_or(0.5);
-                let mut e = Encuadre::limpio(cuartos_fichero);
-                e.escala = (z as f32, z as f32);
-                e.pos = (((0.5 - cx) * (z - 1.0)) as f32, ((0.5 - cy) * (z - 1.0)) as f32);
-                e
-            } else {
-                Encuadre::limpio(cuartos_fichero)
-            };
-            let ausente = !hueco && !ruta.is_file();
-            clips.push(Clip {
-                media, ruta, t_in, t_out, hueco,
-                fade: c["fade"].as_f64().unwrap_or(0.0),
-                speed: c["speed"].as_f64().map(|v| v.clamp(-8.0, 8.0)).unwrap_or(1.0),
-                enc, cuartos_fichero,
-                prefs,
-                lut_in: busca_lut(&dir_in, nom_in),
-                lut_color: busca_lut(&dir_col, nom_c),
-                mute: c["mute"].as_bool().unwrap_or(false),
-                desfase: c["desfase"].as_f64().unwrap_or(0.0),
-                washi: c["washi"].as_u64().map(|w| (w % 4) as u8),
-                nota: c["nota"].as_str().unwrap_or("").to_string(),
-                grupo: c["grupo"].as_u64().map(|g| g as u32),
-                ausente,
-            });
-        }
+        let clips = carga_clips_de(
+            &v["clips"].as_array().cloned().unwrap_or_default(), &base,
+            &dir_in, &dir_col, &prefs_proy, &nom_in_proy, &nom_c_proy,
+            &mut ausentes);
+
+        // ── LAS CAPAS (CAPAS §2): clips colocados, leídos por el mismo lector ──
+        let capas_json = v["capas"].as_array().cloned().unwrap_or_default();
+        let capas_clips = carga_clips_de(&capas_json, &base, &dir_in, &dir_col,
+                                         &prefs_proy, &nom_in_proy, &nom_c_proy,
+                                         &mut ausentes);
+        let capas: Vec<Capa> = capas_clips.into_iter().zip(capas_json.iter())
+            .map(|(c, j)| Capa {
+                c,
+                start: j["start"].as_f64().unwrap_or(0.0).max(0.0),
+                fundido_in: j["fadeIn"].as_f64().unwrap_or(0.0).max(0.0),
+                fundido_out: j["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
+            }).collect();
 
         let lut_in = busca_lut(&dir_in, &nom_in_proy);
         let lut_color = busca_lut(&dir_col, &nom_c_proy);
@@ -1042,6 +1238,19 @@ impl Proyecto {
             (Some(a), Some(b)) if b > a + 0.01 => Some((a, b)),
             _ => None,
         };
+        // ── LAS BOBINAS HIJAS de los clips anidados (CAPAS §2) ────────────
+        // Se cargan al abrir (y al volver de editarlas, porque volver ES
+        // volver a cargar): así la anidada está viva sin más maquinaria.
+        let mut subbobinas = std::collections::HashMap::new();
+        let claves: std::collections::HashSet<String> =
+            clips.iter().filter_map(|c| c.anidada.clone()).collect();
+        for clave in claves {
+            match carga_sub(&base, &clave, &dir_in, &dir_col) {
+                Some(sb) => { subbobinas.insert(clave, sb); }
+                None => eprintln!("⚠ bobina anidada «{clave}»: no se pudo cargar                                    (el clip se conserva y se ve negro)"),
+            }
+        }
+
         let nombre = if actual.is_empty() { "bobina clásica".to_string() } else { actual.to_string() };
         Ok(Proyecto {
             base,
@@ -1054,6 +1263,8 @@ impl Proyecto {
             formato,
             marcas,
             audio,
+            capas,
+            subbobinas,
             mudo_voz: v["mudo"]["voz"].as_bool().unwrap_or(false),
             mudo_musica: v["mudo"]["musica"].as_bool().unwrap_or(false),
             rango,
@@ -1086,6 +1297,56 @@ impl Proyecto {
         match &self.formato {
             Some(f) => format!("{}p{} · {}", f.h.min(f.w), fps, f.aspecto),
             None => format!("auto · {fps} fps"),
+        }
+    }
+
+    /// RESOLVER UN CLIP para la preview (CAPAS §6): si es una anidada,
+    /// devuelve el clip REAL de la hija que suena en `src_t` (tiempo en la
+    /// línea de la hija) y su tiempo de fuente. Un nivel: el máster aplana
+    /// hasta tres, la preview enseña el primero (anotado en CAPAS.md).
+    pub fn resuelve(&self, i: usize, src_t: f64) -> Option<(&Clip, f64)> {
+        let c = self.clips.get(i)?;
+        let Some(clave) = &c.anidada else { return Some((c, src_t)) };
+        let sb = self.subbobinas.get(clave)?;
+        let mut acc = 0.0;
+        for hc in &sb.clips {
+            let fin = acc + hc.dur();
+            if src_t < fin || std::ptr::eq(hc, sb.clips.last().unwrap()) {
+                return Some((hc, hc.fuente_en(src_t - acc)));
+            }
+            acc = fin;
+        }
+        None
+    }
+
+    /// LAS CAPAS VISIBLES en el segundo `t`: hasta dos, de abajo arriba, con
+    /// su tiempo de fuente y su alfa (CAPAS §3)
+    pub fn capas_en(&self, t: f64) -> Vec<(usize, f64, f32)> {
+        let mut v: Vec<(usize, f64, f32)> = self.capas.iter().enumerate()
+            .filter(|(_, cp)| t >= cp.start - 1e-9 && t < cp.fin() - 1e-9)
+            .map(|(k, cp)| (k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t)))
+            .collect();
+        let n = v.len();
+        if n > 2 { v.drain(..n - 2); }
+        v
+    }
+
+    /// RECARGAR LAS BOBINAS HIJAS (CAPAS §2): al insertar una anidada nueva
+    /// o al volver de editar una hija
+    pub fn recarga_subbobinas(&mut self) {
+        let dir_in = crate::prefs::dir_luts(&self.base, "entrada");
+        let dir_col = crate::prefs::dir_luts(&self.base, "color");
+        self.subbobinas.clear();
+        let mut cola: Vec<(String, usize)> = self.clips.iter()
+            .filter_map(|c| c.anidada.clone()).map(|k| (k, 0)).collect();
+        while let Some((clave, hondo)) = cola.pop() {
+            if self.subbobinas.contains_key(&clave) || clave == self.nombre { continue }
+            if hondo >= 3 { continue }
+            if let Some(sb) = carga_sub(&self.base, &clave, &dir_in, &dir_col) {
+                cola.extend(sb.clips.iter().filter_map(|c| c.anidada.clone())
+                    .map(|k| (k, hondo + 1)));
+                self.subbobinas.insert(clave, sb);
+            }
         }
     }
 

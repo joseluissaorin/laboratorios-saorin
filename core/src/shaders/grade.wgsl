@@ -218,14 +218,24 @@ fn fs_main(in: VsOut) -> FragOut {
   // el encuadre se calcula UNA vez: antes se hacía aquí para el letterbox y
   // otra vez dentro de `sample_src`
   let enc = encuadra(in.uv);
-  // FUERA DEL MATERIAL = NEGRO, y negro de verdad: si el letterbox pasara por
-  // las gelatinas saldría del color al que la LUT lleve el cero, que no tiene
-  // por qué ser negro
+  // FUERA DEL MATERIAL = NEGRO para el base — y TRANSPARENTE para una capa
+  // (src_mode ≥ 2): lo que deja ver el fotograma de abajo (CAPAS §4)
   if enc.z < 0.0 {
     var n: FragOut;
-    n.raw = vec4(0.0, 0.0, 0.0, 1.0);
-    n.graded = vec4(0.0, 0.0, 0.0, 1.0);
+    let a = select(1.0, 0.0, P.src_mode >= 2u);
+    n.raw = vec4(0.0, 0.0, 0.0, a);
+    n.graded = vec4(0.0, 0.0, 0.0, a);
     return n;
+  }
+  // RGBA capa (src_mode 3): alfa por píxel, sin matriz YUV ni corrector ND
+  if P.src_mode == 3u {
+    let px = textureSampleLevel(tVideo, samp, enc.xy, 0.0);
+    var c = clamp(max(px.rgb, vec3(0.0)) * exp2(P.gain), vec3(0.0), vec3(1.0));
+    if P.lut_b_on == 1u { c = clamp(lut3(tLutB, P.lut_nb, c), vec3(0.0), vec3(1.0)); }
+    var o3: FragOut;
+    o3.raw = vec4(c, px.a * P.peso);
+    o3.graded = vec4(c, px.a * P.peso);
+    return o3;
   }
   let m = sample_src(enc.xy);
   var raw: vec3<f32>;
@@ -284,7 +294,7 @@ fn fs_main(in: VsOut) -> FragOut {
   if P.lut_b_on == 1u { graded = clamp(lut3(tLutB, P.lut_nb, graded), vec3(0.0), vec3(1.0)); }
 
   var o: FragOut;
-  o.raw = vec4(raw, 1.0);
-  o.graded = vec4(graded, 1.0);
+  o.raw = vec4(raw, P.peso);
+  o.graded = vec4(graded, P.peso);
   return o;
 }

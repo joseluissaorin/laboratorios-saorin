@@ -569,6 +569,36 @@ fn run(
         (ib, ob, pl)
     } else { (Vec::new(), Vec::new(), Vec::new()) };
     let mut held_b: std::collections::VecDeque<mf_decode::GpuFrame> = Default::default();
+    // ── los carriles de LAS CAPAS (CAPAS §5): C y D, como el B ────────────
+    // Sólo se crean si alguna capa es de vídeo; las de foto y rótulo van
+    // residentes y no necesitan anillo.
+    let es_video_capa = |b: &PlanWin, f: u32| f != filmlook_core::plan::NINGUNA
+        && !b.plan.fuentes[f as usize].foto && !b.plan.fuentes[f as usize].hueco;
+    let hay_capa_video = bob.as_ref().map(|b| b.plan.renglones.iter()
+        .any(|r| es_video_capa(b, r.fuente_c) || es_video_capa(b, r.fuente_d)))
+        .unwrap_or(false);
+    let mut haz_carril = || -> Result<(Vec<Slot>, Vec<(ID3D11Texture2D, HANDLE)>,
+                                       Vec<Option<ID3D12CommandList>>)> {
+        let ib: Vec<Slot> = (0..M).map(|_| make_slot(&d, &gpu, src_w, src_h, false))
+            .collect::<Result<_>>()?;
+        let ob: Vec<_> = (0..M).map(|_| d.p010_shared_tex(src_w, src_h))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pl: Vec<Option<ID3D12CommandList>> = Vec::new();
+        for i in 0..M {
+            let own12 = interop::open_resource12(&gpu, ob[i].1)?;
+            let y12 = interop::open_resource12(&gpu, ib[i].yh)?;
+            let uv12 = interop::open_resource12(&gpu, ib[i].uvh)?;
+            pl.push(Some(record(&[(&y12, 0, &own12, 0), (&uv12, 0, &own12, 1)])?));
+        }
+        Ok((ib, ob, pl))
+    };
+    let (ins_c, owns_c, pre_c) = if hay_capa_video { haz_carril()? }
+                                 else { (Vec::new(), Vec::new(), Vec::new()) };
+    let (ins_d, owns_d, pre_d) = if hay_capa_video { haz_carril()? }
+                                 else { (Vec::new(), Vec::new(), Vec::new()) };
+    if hay_capa_video { eprintln!("   carriles C y D para capas de vídeo: {M} hueco(s)"); }
+    let mut held_c: std::collections::VecDeque<mf_decode::GpuFrame> = Default::default();
+    let mut held_d: std::collections::VecDeque<mf_decode::GpuFrame> = Default::default();
 
     loop {
         // EL RENGLÓN: de qué fuente sale este fotograma, en qué segundo y con
@@ -660,6 +690,39 @@ fn run(
                 }
             }
         }
+        // ── LAS CAPAS DE VÍDEO: mismo trato que el lado B ────────────────
+        let mut c_slot: Option<usize> = None;
+        let mut d_slot: Option<usize> = None;
+        if let Some(r) = &ren {
+            if r.fuente_c != filmlook_core::plan::NINGUNA && !ins_c.is_empty() {
+                let ic = r.fuente_c as usize;
+                if let Some(fc) = puestos[ic].dec.as_mut()
+                    .and_then(|dv| dv.en(r.t_c).ok().flatten()) {
+                    let k = n % M;
+                    unsafe { d.ctx.CopyResource(&owns_c[k].0, &fc.tex) };
+                    unsafe { ctx4_main.Signal(&f_in11, n as u64 + 1)? };
+                    unsafe { d.ctx.Flush() };
+                    held_c.push_back(fc);
+                    if held_c.len() > M { held_c.pop_front(); }
+                    unsafe { queue12.ExecuteCommandLists(&[pre_c[k].clone()]) };
+                    c_slot = Some(k);
+                }
+            }
+            if r.fuente_d != filmlook_core::plan::NINGUNA && !ins_d.is_empty() {
+                let id2 = r.fuente_d as usize;
+                if let Some(fd) = puestos[id2].dec.as_mut()
+                    .and_then(|dv| dv.en(r.t_d).ok().flatten()) {
+                    let k = n % M;
+                    unsafe { d.ctx.CopyResource(&owns_d[k].0, &fd.tex) };
+                    unsafe { ctx4_main.Signal(&f_in11, n as u64 + 1)? };
+                    unsafe { d.ctx.Flush() };
+                    held_d.push_back(fd);
+                    if held_d.len() > M { held_d.pop_front(); }
+                    unsafe { queue12.ExecuteCommandLists(&[pre_d[k].clone()]) };
+                    d_slot = Some(k);
+                }
+            }
+        }
         let cmd = match &ren {
             Some(r) => {
                 let ia = r.fuente_a as usize;
@@ -687,9 +750,9 @@ fn run(
                     Some((vy, vuv)) => (vy, vuv),
                     None => (&slot.y_view, &slot.uv_view),
                 };
-                ch.revela_en(&gpu.device, &gpu.queue, &mut enc2,
-                             ya, uva, &ga, Some((&va, &vb)),
-                             (n % N) as u64, 0, true);
+                ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
+                               ya, uva, &ga, Some((&va, &vb)),
+                               (n % N) as u64, 0, true, None, ia as u64);
                 // el lado B: un dibujo más, con su peso. Eso es el fundido.
                 let b_foto = (r.fuente_b != filmlook_core::plan::NINGUNA)
                     .then(|| puestos[r.fuente_b as usize].foto.is_some())
@@ -707,9 +770,39 @@ fn run(
                         Some((vy, vuv)) => (vy, vuv),
                         None => (&ins_b[k].y_view, &ins_b[k].uv_view),
                     };
-                    ch.revela_en(&gpu.device, &gpu.queue, &mut enc2,
-                                 yb, uvb, &gb, Some((&vc, &vd)),
-                                 k as u64, 1, true);
+                    ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
+                                   yb, uvb, &gb, Some((&vc, &vd)),
+                                   k as u64, 1, true, None, ib as u64);
+                }
+                // ── LAS CAPAS: C y luego D, encima de todo (CAPAS §5) ──
+                // `peso = alfa` de la capa; el alfa por píxel de un RGBA lo
+                // multiplica el shader. pad1 = 1: un rótulo no arrastra
+                // historia del obturador.
+                for (ci, (fk, ak, kslot, ring)) in [
+                    (r.fuente_c, r.alfa_c, c_slot, &ins_c),
+                    (r.fuente_d, r.alfa_d, d_slot, &ins_d),
+                ].into_iter().enumerate() {
+                    if fk == filmlook_core::plan::NINGUNA { continue }
+                    let ic = fk as usize;
+                    let mut gc = puestos[ic].gu;
+                    gc.pad0 = 0.0;
+                    gc.pad1 = 1.0;
+                    gc.peso = ak;
+                    let (lc2, ld2) = (puestos[ic].lut_a, puestos[ic].lut_b);
+                    let (vc2, vd2) = (luts_cat[lc2].1.clone(), luts_cat[ld2].1.clone());
+                    let carril = 2 + ci as u64;
+                    if let Some(v) = puestos[ic].capa_rgba.clone() {
+                        ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
+                                       &slot.y_view, &slot.uv_view, &gc,
+                                       Some((&vc2, &vd2)),
+                                       (n % N) as u64, carril, true,
+                                       Some(&v), ic as u64);
+                    } else if let Some(k) = kslot {
+                        ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
+                                       &ring[k].y_view, &ring[k].uv_view, &gc,
+                                       Some((&vc2, &vd2)),
+                                       k as u64, carril, true, None, ic as u64);
+                    }
                 }
                 // la receta del pase caro es la del clip que manda ahora
                 let manda = if r.fuente_b != filmlook_core::plan::NINGUNA && r.peso_b > 0.5 {
@@ -854,6 +947,8 @@ pub struct Puesto {
     /// §4bis.10). Sin esto, una bobina con una sola tarjeta de título caía al
     /// camino viejo entero (que funciona, pero es tres veces más lento).
     pub foto: Option<(wgpu::TextureView, wgpu::TextureView)>,
+    /// la capa RGBA residente (CAPAS §5): rótulos y fotos CON su alfa
+    pub capa_rgba: Option<wgpu::TextureView>,
     pub gu: filmlook_core::params::GradeU,
     pub comp: filmlook_core::params::CompU,
     pub shutter: f32,
@@ -969,19 +1064,45 @@ fn prepara_bobina(d: &d11::D11, gpu: &interop::Gpu, b: &PlanWin)
     for f in &b.plan.fuentes {
         let (ka, na) = pide(f.lut_in.as_deref(), "entrada", &mut catalogo, &mut indice);
         let (kb, nb) = pide(f.lut.as_deref(), "color", &mut catalogo, &mut indice);
-        let (dec, foto) = if f.hueco {
-            (None, None)
+        let (dec, foto, capa_rgba, dims_rgba) = if f.hueco {
+            (None, None, None, None)
+        } else if f.foto && f.capa {
+            // UNA CAPA con foto o rótulo: RGBA residente CON su alfa
+            let (w2, h2, datos) = filmlook_core::foto::rgba(
+                std::path::Path::new(&f.fichero))
+                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?;
+            let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capa rgba"),
+                size: wgpu::Extent3d { width: w2, height: h2, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &datos,
+                wgpu::TexelCopyBufferLayout { offset: 0,
+                    bytes_per_row: Some(w2 * 4), rows_per_image: None },
+                wgpu::Extent3d { width: w2, height: h2, depth_or_array_layers: 1 });
+            eprintln!("   capa RGBA residente: {} ({w2}×{h2})", f.fichero);
+            let v = t.create_view(&Default::default());
+            std::mem::forget(t);
+            (None, None, Some(v), Some((w2, h2)))
         } else if f.foto {
             let (fw, fh, vy, vuv) = foto_residente(&gpu.device, &gpu.queue, &f.fichero)?;
             eprintln!("   foto residente: {} ({fw}×{fh})", f.fichero);
-            (None, Some((fw, fh, vy, vuv)))
+            (None, Some((fw, fh, vy, vuv)), None, None)
         } else {
             (Some(mf_decode::MfDecoder::new(d, &f.fichero)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?), None)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", f.fichero))?), None, None, None)
         };
-        let (sw, sh) = match (&dec, &foto) {
-            (Some(x), _) => (x.width, x.height),
-            (_, Some((fw, fh, _, _))) => (*fw, *fh),
+        let (sw, sh) = match (&dec, &foto, &dims_rgba) {
+            (Some(x), _, _) => (x.width, x.height),
+            (_, Some((fw, fh, _, _)), _) => (*fw, *fh),
+            (_, _, Some((fw, fh))) => (*fw, *fh),
             _ => (pw, ph),
         };
         // el alto VISIBLE (el decoder alinea la superficie a 16/32). Una foto
@@ -995,9 +1116,12 @@ fn prepara_bobina(d: &d11::D11, gpu: &interop::Gpu, b: &PlanWin)
         gu.enc_b = mb;
         gu.paso = paso;
         gu.yuv_norm = visible as f32 / sh as f32;
+        // la semántica de capa (CAPAS §4): 2 = vídeo capa, 3 = RGBA capa
+        if f.capa { gu.src_mode = if f.foto { 3 } else { 2 }; }
         puestos.push(Puesto {
             dec,
             foto: foto.map(|(_, _, vy, vuv)| (vy, vuv)),
+            capa_rgba,
             gu,
             comp: params::comp_u(&f.prefs, pw, ph),
             shutter: f.prefs["shutter"].as_f64().unwrap_or(0.0) as f32,
