@@ -1035,6 +1035,29 @@ reconstruida (`carpeta del taller + nombre`) en vez de la real. Con un
 másteres viejos creyendo que eran nuevos **dos veces**. Ahora viaja la ruta
 entera.
 
+### El material de 8 bits salía roto en el Mac (3-ago-2026)
+
+**Todo H.264 de 8 bits se revelaba doblado en horizontal y con los colores
+podridos** en el máster del Mac, desde siempre. Nunca se vio porque todo el
+material de prueba histórico —y el del autor— es HEVC 10 bits.
+
+La causa: `Fuente::abre` le pide a VideoToolbox `x420` (planos de 16 bits)
+para HEVC pero `420v` (NV12, planos de 8) para H.264… y `bobina::importa`
+importaba los planos SIEMPRE como `R16Unorm`/`RG16Unorm`. Cada texel de 16
+bits se comía dos píxeles de 8: media imagen por textura, muestreada dos
+veces a lo ancho, y el croma leído a bytes cambiados.
+
+El arreglo es de una pieza: el formato **se le pregunta al buffer**
+(`CVPixelBufferGetPixelFormatType`) y NV12 se importa como `R8`/`RG8` con
+las medidas reales de cada plano (`GetWidthOfPlane`, que además hace bien
+los tamaños impares). Los dos formatos muestrean a [0,1], así que el shader
+ni se entera. El revelado canta ahora una línea por formato distinto
+(`planos '420v': 1280×720…`) para que esto no vuelva a esconderse.
+
+Verificado con la prueba de ácido de 6 capas: testsrc2 H.264 8 bits de base
++ 2 PiP de vídeo + 4 rótulos PNG, fotograma extraído y mirado; y el mismo
+contenido en HEVC 10 bits, idéntico antes y después.
+
 ---
 
 ## 10. Riesgos, con su salida

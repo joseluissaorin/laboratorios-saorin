@@ -309,6 +309,10 @@ struct Estado {
     hover_lata: Option<(usize, std::time::Instant)>,
     visor: visor::Visor,
     banco_h: f32,
+    /// cuánto ha crecido el banco por las pistas de capa visibles (px)
+    extra_capas: f32,
+    /// carriles de música visibles (los usados más uno libre; mínimo 3)
+    musica_vis: usize,
     raton: (f32, f32),
     arrastrando: Arrastre,
     estanteria: Vec<proyecto::Cinta>,
@@ -766,6 +770,8 @@ impl ApplicationHandler for App {
             hover_lata: None,
             visor,
             banco_h: 250.0,
+            extra_capas: 0.0,
+            musica_vis: 3,
             raton: (0.0, 0.0),
             arrastrando: Arrastre::Nada,
             estanteria,
@@ -6185,13 +6191,13 @@ impl Estado {
     fn alto_tira(&self) -> f32 { 88.0 }
 
     /// el centro de la manivela
-    fn manivela_centro(&self) -> (f32, f32) { (198.0, self.banco_y() + 210.0) }
+    fn manivela_centro(&self) -> (f32, f32) { (198.0, self.gpu.alto_ancho().1 - 40.0) }
 
     /// la esquina de arriba a la izquierda de las barras de la mezcla
-    fn medidor_lr_caja(&self) -> (f32, f32) { (14.0, self.banco_y() + 186.0) }
+    fn medidor_lr_caja(&self) -> (f32, f32) { (14.0, self.gpu.alto_ancho().1 - 64.0) }
 
     /// la línea de las dos agujas analógicas
-    fn agujas_y(&self) -> f32 { self.banco_y() + 214.0 }
+    fn agujas_y(&self) -> f32 { self.gpu.alto_ancho().1 - 36.0 }
 
     /// ¿sobre qué mando de nivel está el ratón?
     fn nivel_en(&self, mx: f32, my: f32) -> Option<u8> {
@@ -6233,6 +6239,7 @@ impl Estado {
     fn pista_capa_en(&self, my: f32) -> Option<u8> {
         for p in 0..proyecto::PISTAS_CAPA as u8 {
             let y = self.capa_pista_y(p);
+            if y < self.banco_y() { continue; }   // ese carril aún no se ve
             if my >= y - 2.0 && my <= y + Self::ALTO_CAPA - 4.0 { return Some(p); }
         }
         None
@@ -6251,12 +6258,19 @@ impl Estado {
         })
     }
 
+    /// CUÁNTOS CARRILES DE MÚSICA SE VEN: los usados más uno libre, y nunca
+    /// menos de tres (la mesa de siempre). El mismo gesto que las capas.
+    fn musica_visibles(pr: &Proyecto) -> usize {
+        let usadas = pr.audio.iter().map(|a| a.pista as usize + 1).max().unwrap_or(0);
+        (usadas + 1).max(3).min(proyecto::PISTAS_MUSICA)
+    }
+
     /// qué carril de música hay bajo una y de pantalla
     fn pista_en(&self, my: f32) -> Option<u8> {
         let y0 = self.pista_y(0);
         if my < y0 - 3.0 { return None; }
         let k = ((my - y0) / Self::ALTO_PISTA).floor();
-        if k < 0.0 || k as usize >= proyecto::PISTAS_MUSICA { return None; }
+        if k < 0.0 || k as usize >= self.musica_vis { return None; }
         Some(k as u8)
     }
 
@@ -6277,7 +6291,7 @@ impl Estado {
     }
 
     fn banco_y(&self) -> f32 { self.gpu.alto_ancho().1 - self.banco_h }
-    fn tira_y(&self) -> f32 { self.banco_y() + 46.0 }
+    fn tira_y(&self) -> f32 { self.banco_y() + 46.0 + self.extra_capas }
 
     fn cambia_mando(&mut self, pr: &mut Proyecto, k: &str, paso: f32, lo: f32, hi: f32) {
         // el cuarto oscuro es DEL CLIP QUE HAY BAJO LA AGUJA: lo que se ve es
@@ -7175,7 +7189,7 @@ impl Estado {
                     self.recuerda(pr);
                     if k == 0 { self.normaliza_musica(pr, ia); }
                     else {
-                        let n = proyecto::PISTAS_MUSICA as u8;
+                        let n = self.musica_vis as u8;
                         pr.audio[ia].pista = (pr.audio[ia].pista + 1) % n;
                         let _ = pr.guarda();
                         self.di(&format!("al carril {}", pr.audio[ia].pista + 1));
@@ -7450,7 +7464,7 @@ impl Estado {
                         self.di(m);
                         return;
                     }
-                    if my > my_y - 2.0 && my < my_y + 26.0 * proyecto::PISTAS_MUSICA as f32 {
+                    if my > my_y - 2.0 && my < my_y + Self::ALTO_PISTA * self.musica_vis as f32 {
                         pr.mudo_musica = !pr.mudo_musica;
                         let _ = pr.guarda();
                         self.visor.manda_mezcla(pr);
@@ -7620,7 +7634,7 @@ impl Estado {
                         // ⇧+clic: SUBIR O BAJAR DE CARRIL
                         if self.mods.shift_key() {
                             self.recuerda(pr);
-                            let n = proyecto::PISTAS_MUSICA as u8;
+                            let n = self.musica_vis as u8;
                             if let Some(a) = pr.audio.get_mut(i) { a.pista = (a.pista + 1) % n; }
                             let _ = pr.guarda();
                             self.sel_audio = Some(i);
@@ -7775,6 +7789,15 @@ impl Estado {
     }
 
     fn frame(&mut self, pr: &Proyecto) {
+        // LA MESA CRECE CON LOS CARRILES: el banco gana el alto de las
+        // pistas de capa visibles (suben desde la tira) y el de los
+        // carriles de música más allá de los tres de siempre — así ocho
+        // pistas no se comen el visor: se lo piden al banco.
+        self.extra_capas =
+            self.pistas_capa_visibles(pr).saturating_sub(1) as f32 * Self::ALTO_CAPA;
+        self.musica_vis = Self::musica_visibles(pr);
+        self.banco_h = 250.0 + self.extra_capas
+            + self.musica_vis.saturating_sub(3) as f32 * Self::ALTO_PISTA;
         self.dib_frames += 1;
         let v = self.dib_desde.elapsed().as_secs_f64();
         if v >= 2.0 {
@@ -8488,7 +8511,7 @@ impl Estado {
                                                          cp.c.t_in, cp.c.t_out)); y += 16.0;
                 fila(&mut d, y, "qué es", if crate::foto::es_foto(&cp.c.ruta) {
                     "foto o rótulo (con su alfa)" } else { "vídeo (PiP)" }); y += 16.0;
-                fila(&mut d, y, "pista", match cp.pista { 0 => "V2", 1 => "V3", _ => "V4" });
+                fila(&mut d, y, "pista", &format!("V{}", cp.pista as usize + 2));
                 y += 20.0;
                 let _ = y;
                 let (y1b, _) = Self::musica_botones_y();
@@ -8962,7 +8985,7 @@ impl Estado {
         let my_y = self.pista_y(0);
         // los CARRILES vacíos, dibujados tenues: con dos o tres canciones hay
         // que verlas apiladas y no encimadas (§2)
-        for k in 0..proyecto::PISTAS_MUSICA {
+        for k in 0..self.musica_vis {
             let py = self.pista_y(k as u8);
             trazo::linea(&mut d, Self::ESTANTE_W + 4.0, py + Self::ALTO_PISTA - 2.0,
                          ancho - 6.0, py + Self::ALTO_PISTA - 2.0, 0.9,
@@ -9218,8 +9241,8 @@ impl Estado {
             for p in 0..visibles as u8 {
                 let cy = self.capa_pista_y(p);
                 // el rótulo del carril y su raya de suelo
-                d2.texto(Self::ESTANTE_W + 4.0, cy + 6.0,
-                         match p { 0 => "V2", 1 => "V3", _ => "V4" }, 7.5,
+                let rotulo = format!("V{}", p as usize + 2);
+                d2.texto(Self::ESTANTE_W + 4.0, cy + 6.0, &rotulo, 7.5,
                          paleta::TINTA_TENUE);
                 trazo::linea(&mut d2, Self::ESTANTE_W + 24.0, cy + Self::ALTO_CAPA - 5.0,
                              ancho - 8.0, cy + Self::ALTO_CAPA - 5.0, 1.0,

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 pub use filmlook_core::plan::{Encaje, Encuadre};
 
 /// cuántas pistas de música puede apilar la bobina (§2)
-pub const PISTAS_MUSICA: usize = 3;
+/// cuántos carriles de música puede haber. En la mesa sólo se dibujan los
+/// usados más uno libre (mínimo tres, que es la mesa de siempre).
+pub const PISTAS_MUSICA: usize = 8;
 
 /// UNA MARCA DE LA BOBINA. Era un número suelto y nada más; una marca sirve
 /// para acordarse de algo, así que lleva su nota y su color (§4bis.1).
@@ -118,11 +120,12 @@ impl ClipAudio {
 /// UNA CAPA (CAPAS §2): un clip COLOCADO encima de la bobina, no un eslabón
 /// de ella. Reutiliza `Clip` entero —encuadre, receta, gelatinas, velocidad,
 /// silencio— y añade lo que una capa necesita: dónde entra y sus fundidos.
-/// cuántas pistas de vídeo hay ENCIMA de la base (V2, V3 y V4; V1 es la
-/// bobina). El modelo de composición admite dos capas VISIBLES a la vez en
-/// un fotograma (las dos de más arriba); las pistas son las de DaVinci: cada
-/// una con sus clips, la de arriba tapa a la de abajo.
-pub const PISTAS_CAPA: usize = 3;
+/// cuántas pistas de vídeo puede haber ENCIMA de la base (V2..V9; V1 es la
+/// bobina). Coincide con `plan::MAX_CAPAS`: las ocho pueden estar ocupadas
+/// EN EL MISMO FOTOGRAMA y se componen todas, de abajo arriba — no hay
+/// ninguna que se quede sin dibujar. En la mesa sólo aparecen las usadas
+/// más una libre, así que quien no las usa no las ve.
+pub const PISTAS_CAPA: usize = filmlook_core::plan::MAX_CAPAS;
 
 #[derive(Clone)]
 pub struct Capa {
@@ -1335,8 +1338,9 @@ impl Proyecto {
     /// LAS CAPAS VISIBLES en el segundo `t`: hasta dos, de abajo arriba, con
     /// su tiempo de fuente y su alfa (CAPAS §3)
     pub fn capas_en(&self, t: f64) -> Vec<(usize, f64, f32)> {
-        // EL APILADO ES POR PISTA (V2 < V3 < V4), como en cualquier editor:
-        // a igual pista, la última colocada gana
+        // EL APILADO ES POR PISTA (V2 < V3 < …), como en cualquier editor:
+        // a igual pista, la última colocada gana. TODAS las visibles: el
+        // renglón tiene un hueco por pista, ninguna se cae.
         let mut idx: Vec<usize> = (0..self.capas.len())
             .filter(|&k| {
                 let cp = &self.capas[k];
@@ -1344,15 +1348,12 @@ impl Proyecto {
             })
             .collect();
         idx.sort_by_key(|&k| (self.capas[k].pista, k));
-        let mut v: Vec<(usize, f64, f32)> = idx.into_iter()
+        idx.into_iter()
             .map(|k| {
                 let cp = &self.capas[k];
                 (k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t))
             })
-            .collect();
-        let n = v.len();
-        if n > 2 { v.drain(..n - 2); }
-        v
+            .collect()
     }
 
     /// RECARGAR LAS BOBINAS HIJAS (CAPAS §2): al insertar una anidada nueva

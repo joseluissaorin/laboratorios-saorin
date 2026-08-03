@@ -21,6 +21,23 @@ use serde_json::Value;
 /// no hay segunda fuente en este renglón
 pub const NINGUNA: u32 = u32::MAX;
 
+/// cuántas capas pueden CONVIVIR en un fotograma. Coincide con el máximo de
+/// pistas de vídeo de la mesa: con las ocho ocupadas a la vez, se dibujan
+/// las ocho.
+pub const MAX_CAPAS: usize = 8;
+
+/// una capa en un renglón: qué fuente, en qué segundo y con cuánto alfa
+#[derive(Clone, Copy, Debug)]
+pub struct CapaR {
+    pub fuente: u32,
+    pub t: f64,
+    pub alfa: f32,
+}
+
+impl CapaR {
+    pub const VACIA: CapaR = CapaR { fuente: NINGUNA, t: 0.0, alfa: 0.0 };
+}
+
 /// CÓMO ENCAJA el material en el lienzo del proyecto
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Encaje {
@@ -198,18 +215,12 @@ pub struct Renglon {
     /// fundido contra un color plano (negro=0, blanco=1); `nivel` es cuánto
     pub color_fijo: f32,
     pub nivel_color: f32,
-    /// LA CAPA de este fotograma (CAPAS §3): un dibujo más, encima de A y B.
-    /// `NINGUNA` si no hay. `alfa_c` es su alfa global (los fundidos de
-    /// entrada y salida de la capa); el alfa por píxel, si es RGBA, va aparte
-    /// y lo multiplica el shader.
-    pub fuente_c: u32,
-    pub t_c: f64,
-    pub alfa_c: f32,
-    /// LA SEGUNDA CAPA: dos pueden convivir (un rótulo sobre un PiP es el
-    /// caso normal). D se dibuja DESPUÉS de C: es la de más arriba.
-    pub fuente_d: u32,
-    pub t_d: f64,
-    pub alfa_d: f32,
+    /// LAS CAPAS de este fotograma (CAPAS §3): dibujos de más, encima de A y
+    /// B, DE ABAJO ARRIBA. Hasta `MAX_CAPAS` a la vez — que con ocho pistas
+    /// de vídeo son TODAS: no hay ninguna que se quede sin dibujar. El alfa
+    /// es el global de cada capa (sus fundidos); el alfa por píxel, si es
+    /// RGBA, va aparte y lo multiplica el shader.
+    pub capas: [CapaR; MAX_CAPAS],
     /// AQUÍ EMPIEZA UN PLANO NUEVO. Un corte seco no tiene continuidad de luz:
     /// el arrastre del obturador **no cruza el empalme**. Sin esto, el primer
     /// fotograma del clip entrante llevaba encima un 14 % del clip que se iba
@@ -337,8 +348,7 @@ pub fn compila(payload: &Value) -> Result<Plan, String> {
             fuente_a: src as u32, fuente_b: NINGUNA, peso_b: 0.0,
             t_a: t_fuente(t_in, t_out, i, fps, f.veloc),
             t_b: 0.0, color_fijo: 0.0, nivel_color: 0.0,
-            fuente_c: NINGUNA, t_c: 0.0, alfa_c: 0.0,
-            fuente_d: NINGUNA, t_d: 0.0, alfa_d: 0.0,
+            capas: [CapaR::VACIA; MAX_CAPAS],
             corte: false,
         };
         // ¿estamos dentro de la junta con el siguiente?
@@ -497,34 +507,28 @@ pub fn compila(payload: &Value) -> Result<Plan, String> {
                 fo: c["fadeOut"].as_f64().unwrap_or(0.0).max(0.0),
             });
         }
+        // el apilado es POR PISTA (y a igual pista, el orden de llegada)
+        let mut orden: Vec<usize> = (0..lista.len()).collect();
+        orden.sort_by_key(|&k| (capas[k]["pista"].as_u64().unwrap_or(0), k));
         for (t, r) in renglones.iter_mut().enumerate() {
             let seg = t as f64 / fps;
-            // LAS DOS DE MÁS ARRIBA que cubran este instante (el orden de la
-            // lista es el apilado): la de abajo va al hueco C y la de encima
-            // al D, que se dibuja después. Tres o más solapadas a la vez: se
-            // quedan las dos superiores, y el diario lo dice.
-            let mut cubren = lista.iter()
-                .filter(|c| seg >= c.start - 1e-9 && seg < c.start + c.dur - 1e-9);
-            let bajo_topmost: Vec<&Cp> = {
-                let mut v: Vec<&Cp> = cubren.by_ref().collect();
-                let n = v.len();
-                if n > 2 { v.drain(..n - 2); }
-                v
-            };
-            for (hueco, cp) in bajo_topmost.iter().enumerate() {
+            // TODAS las que cubren este instante, de abajo arriba. Con más de
+            // MAX_CAPAS solapadas a la vez se quedan las de encima — y con el
+            // máximo igual al número de pistas, eso no pasa nunca.
+            let cubren: Vec<&Cp> = orden.iter().map(|&k| &lista[k])
+                .filter(|c| seg >= c.start - 1e-9 && seg < c.start + c.dur - 1e-9)
+                .collect();
+            let desde = cubren.len().saturating_sub(MAX_CAPAS);
+            for (hueco, cp) in cubren[desde..].iter().enumerate() {
                 let dentro = seg - cp.start;
                 let i = (dentro * fps).round() as usize;
                 let tt = t_fuente(cp.t_in, cp.t_out, i, fps, cp.veloc);
                 let mut a = 1.0f32;
                 if cp.fi > 0.001 { a = a.min((dentro / cp.fi) as f32); }
                 if cp.fo > 0.001 { a = a.min(((cp.dur - dentro) / cp.fo) as f32); }
-                let a = a.clamp(0.0, 1.0);
-                // la primera (más abajo) al C; la segunda (encima) al D
-                if hueco == 0 {
-                    r.fuente_c = cp.src as u32; r.t_c = tt; r.alfa_c = a;
-                } else {
-                    r.fuente_d = cp.src as u32; r.t_d = tt; r.alfa_d = a;
-                }
+                r.capas[hueco] = CapaR {
+                    fuente: cp.src as u32, t: tt, alfa: a.clamp(0.0, 1.0),
+                };
             }
         }
     }
@@ -560,10 +564,11 @@ pub fn tramos(renglones: &[Renglon]) -> Vec<Tramo> {
     for (i, r) in renglones.iter().enumerate() {
         let mut f = vec![r.fuente_a];
         if r.fuente_b != NINGUNA { f.push(r.fuente_b); }
-        // LA CAPA ES DEPENDENCIA: sin esto, la caché fina daba por bueno un
-        // tramo viejo después de mover o recolorear la capa que lo cruza.
-        if r.fuente_c != NINGUNA { f.push(r.fuente_c); }
-        if r.fuente_d != NINGUNA { f.push(r.fuente_d); }
+        // LAS CAPAS SON DEPENDENCIA: sin esto, la caché fina daba por bueno
+        // un tramo viejo después de mover o recolorear una capa que lo cruza.
+        for c in &r.capas {
+            if c.fuente != NINGUNA { f.push(c.fuente); }
+        }
         match v.last_mut() {
             Some(t) if t.fuentes == f => t.cuantos += 1,
             _ => v.push(Tramo { desde: i, cuantos: 1, fuentes: f }),
@@ -1221,7 +1226,7 @@ mod pruebas {
         assert!((au[0]["in"].as_f64().unwrap() - 11.0).abs() < 1e-9);
         // y el resultado COMPILA con las capas dentro
         let plan = compila(&p).unwrap();
-        assert!(plan.renglones.iter().any(|r| r.fuente_c != NINGUNA));
+        assert!(plan.renglones.iter().any(|r| r.capas[0].fuente != NINGUNA));
     }
 
     #[test]
@@ -1290,13 +1295,13 @@ mod pruebas {
         assert_eq!(p.fuentes.len(), 2);
         assert!(p.fuentes[1].capa && p.fuentes[1].foto);
         // fotogramas 0..9 sin capa; 10..29 con ella; 30..39 sin
-        assert!(p.renglones[..10].iter().all(|r| r.fuente_c == NINGUNA));
-        assert!(p.renglones[10..30].iter().all(|r| r.fuente_c == 1));
-        assert!(p.renglones[30..].iter().all(|r| r.fuente_c == NINGUNA));
+        assert!(p.renglones[..10].iter().all(|r| r.capas[0].fuente == NINGUNA));
+        assert!(p.renglones[10..30].iter().all(|r| r.capas[0].fuente == 1));
+        assert!(p.renglones[30..].iter().all(|r| r.capas[0].fuente == NINGUNA));
         // la rampa: a mitad del fundido de entrada, alfa ≈ 0,5; en el cuerpo, 1
-        let a = p.renglones[12].alfa_c;          // 0,25 s dentro de 0,5 s
+        let a = p.renglones[12].capas[0].alfa;   // 0,25 s dentro de 0,5 s
         assert!((a - 0.5).abs() < 0.11, "alfa de la rampa = {a}");
-        assert!((p.renglones[20].alfa_c - 1.0).abs() < 1e-6);
+        assert!((p.renglones[20].capas[0].alfa - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1309,13 +1314,31 @@ mod pruebas {
                 {"file": "arriba.png", "start": 1.0, "in": 0.0, "out": 1.0},
             ],
         })).unwrap();
-        assert_eq!(p.renglones[5].fuente_c, 1);   // sólo la de abajo
-        assert_eq!(p.renglones[5].fuente_d, NINGUNA);
-        // donde conviven: la de abajo en C y la de encima en D — LAS DOS
-        assert_eq!(p.renglones[15].fuente_c, 1);
-        assert_eq!(p.renglones[15].fuente_d, 2);
-        assert_eq!(p.renglones[25].fuente_c, 1);
-        assert_eq!(p.renglones[25].fuente_d, NINGUNA);
+        assert_eq!(p.renglones[5].capas[0].fuente, 1);   // sólo la de abajo
+        assert_eq!(p.renglones[5].capas[1].fuente, NINGUNA);
+        // donde conviven: la de abajo en el hueco 0 y la de encima en el 1
+        assert_eq!(p.renglones[15].capas[0].fuente, 1);
+        assert_eq!(p.renglones[15].capas[1].fuente, 2);
+        assert_eq!(p.renglones[25].capas[0].fuente, 1);
+        assert_eq!(p.renglones[25].capas[1].fuente, NINGUNA);
+    }
+
+    #[test]
+    fn ocho_capas_conviven_y_ninguna_se_cae() {
+        let capas: Vec<Value> = (0..8).map(|k| serde_json::json!({
+            "file": format!("c{k}.png"), "start": 0.0, "in": 0.0, "out": 1.0,
+            "pista": k,
+        })).collect();
+        let p = compila(&serde_json::json!({
+            "project": {"w": 1920, "h": 1080, "fps": 10.0},
+            "clips": [{"file": "base.mp4", "in": 0.0, "out": 1.0}],
+            "clips2": capas,
+        })).unwrap();
+        let r = &p.renglones[5];
+        for k in 0..8 {
+            assert_eq!(r.capas[k].fuente, 1 + k as u32,
+                       "el hueco {k} lleva su pista, de abajo arriba");
+        }
     }
 
     #[test]

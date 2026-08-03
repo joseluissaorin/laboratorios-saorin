@@ -64,8 +64,9 @@ pub struct Visor {
     grade_capa: Pass,
     /// texturas RGBA residentes de las capas foto/rótulo, por ruta
     capa_rgba: std::collections::HashMap<PathBuf, (wgpu::Texture, wgpu::TextureView)>,
-    /// los uniformes de los dos huecos de capa
-    capa_bufs: [wgpu::Buffer; 2],
+    /// los uniformes de los huecos de capa (uno por pista posible: cada
+    /// dibujo el suyo, o el último write_buffer pisaría a los demás)
+    capa_bufs: Vec<wgpu::Buffer>,
     samp: wgpu::Sampler, samp_rep: wgpu::Sampler,
     t_y: wgpu::Texture, t_u: wgpu::Texture, t_v: wgpu::Texture,
     grade_bg: wgpu::BindGroup,
@@ -293,20 +294,14 @@ impl Visor {
             cache_lut: std::collections::HashMap::new(),
             tam_cache: std::collections::HashMap::new(),
             capa_rgba: std::collections::HashMap::new(),
-            capa_bufs: [
+            capa_bufs: (0..filmlook_core::plan::MAX_CAPAS).map(|_| {
                 g.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("capa 0"),
+                    label: Some("capa"),
                     size: params::bytes_uniforme::<params::GradeU>(),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
-                }),
-                g.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("capa 1"),
-                    size: params::bytes_uniforme::<params::GradeU>(),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-            ],
+                })
+            }).collect(),
             lut_puestas: (String::new(), String::new()),
             bg_sucio: false,
             encuadre: crate::proyecto::Encuadre::limpio(0),
@@ -1055,13 +1050,14 @@ impl Visor {
                                              self.w, self.h);
             gu.src_mode = 3;
             gu.peso = alfa;
-            g.queue.write_buffer(&self.capa_bufs[hueco.min(1)], 0,
+            let nb = self.capa_bufs.len();
+            g.queue.write_buffer(&self.capa_bufs[hueco.min(nb - 1)], 0,
                                  bytemuck::bytes_of(&gu));
             let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None, layout: &self.grade_capa.layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0,
-                        resource: self.capa_bufs[hueco.min(1)].as_entire_binding() },
+                        resource: self.capa_bufs[hueco.min(nb - 1)].as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1,
                         resource: wgpu::BindingResource::TextureView(&self.vistas_yuv.0) },
                     wgpu::BindGroupEntry { binding: 2,

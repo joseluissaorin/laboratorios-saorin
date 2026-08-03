@@ -113,7 +113,7 @@ pub struct WinChain {
     /// de una junta caían en el mismo sitio y AMBOS dibujos se hacían con la
     /// receta del último: el lado A de un encadenado llevaba el encuadre y el
     /// peso del B. Con capas serían cuatro escrituras pisándose.
-    pub grade_bufs: [wgpu::Buffer; 4],
+    pub grade_bufs: [wgpu::Buffer; 2 + filmlook_core::plan::MAX_CAPAS],
     /// el 1×1 blanco que ata el hueco de la capa cuando no hay capa
     pub blanco: wgpu::TextureView,
     pub comp_buf: wgpu::Buffer,
@@ -271,12 +271,8 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
         let shutter = params::f(prefs, "shutter", 0.0);
         let weave = params::f(prefs, "weave", 0.0);
         let grade_buf = uniform_buffer(device, bytemuck::bytes_of(&grade_u));
-        let grade_bufs = [
-            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
-            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
-            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
-            uniform_buffer(device, bytemuck::bytes_of(&grade_u)),
-        ];
+        let grade_bufs = std::array::from_fn(|_|
+            uniform_buffer(device, bytemuck::bytes_of(&grade_u)));
         let blanco = {
             let t = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("capa blanca"),
@@ -352,7 +348,7 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
     ) {
         // CADA CARRIL SU BÚFER: los write_buffer van todos antes del submit y
         // con uno compartido el último pisaba a los demás (ver el campo)
-        let buf = &self.grade_bufs[(carril as usize).min(3)];
+        let buf = &self.grade_bufs[(carril as usize).min(1 + filmlook_core::plan::MAX_CAPAS)];
         queue.write_buffer(buf, 0, bytemuck::bytes_of(gu));
         let (la, lb) = luts.unwrap_or((&self.lut_a.1, &self.lut_b.1));
         let rgba = rgba.unwrap_or(&self.blanco);

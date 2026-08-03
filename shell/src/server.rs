@@ -1961,13 +1961,20 @@ fn revela_por_tramos(plan: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &s
         // la clave es el CONTENIDO del tramo, no dónde cae en la bobina
         let mut h = DefaultHasher::new();
         for r in &comp.renglones[desde..(desde + cuantos).min(comp.renglones.len())] {
-            format!("{}|{}|{:.5}|{:.5}|{:.5}|{:.5}|{}|{:.5}|{:.4}|{}|{:.5}|{:.4}",
-                    r.fuente_a, r.fuente_b, r.peso_b, r.t_a, r.t_b, r.nivel_color,
-                    r.fuente_c, r.t_c, r.alfa_c, r.fuente_d, r.t_d, r.alfa_d)
-                .hash(&mut h);
+            let mut linea = format!("{}|{}|{:.5}|{:.5}|{:.5}|{:.5}",
+                    r.fuente_a, r.fuente_b, r.peso_b, r.t_a, r.t_b, r.nivel_color);
+            for c in &r.capas {
+                if c.fuente == crate::plan::NINGUNA { continue }
+                linea += &format!("|{}~{:.5}~{:.4}", c.fuente, c.t, c.alfa);
+            }
+            linea.hash(&mut h);
         }
         for f in comp.renglones[desde..(desde + cuantos).min(comp.renglones.len())].iter()
-                     .flat_map(|r| [r.fuente_a, r.fuente_b, r.fuente_c, r.fuente_d])
+                     .flat_map(|r| {
+                         let mut v = vec![r.fuente_a, r.fuente_b];
+                         v.extend(r.capas.iter().map(|c| c.fuente));
+                         v
+                     })
                      .filter(|x| (*x as usize) < comp.fuentes.len())
                      .collect::<std::collections::BTreeSet<_>>() {
             let s = &comp.fuentes[f as usize];

@@ -33,8 +33,9 @@ anidamiento.
 
 Por tanto:
 
-- el **renglón** gana un tercer hueco: `fuente_c` + `t_c` + `alfa_c`
-  (la capa de ese fotograma, con su alfa global por fundidos);
+- el **renglón** gana `capas: [CapaR; MAX_CAPAS]` — un hueco por pista
+  (fuente + t + alfa por fundidos); TODAS las que cubren el fotograma se
+  dibujan, de abajo arriba;
 - la **fuente** gana `capa: bool` (semántica de composición) y
   `mat: Option<[f32;6]>` (matriz explícita, para lo aplanado);
 - los **shaders** ganan la semántica de capa: `src_mode` 2 = vídeo capa,
@@ -52,15 +53,17 @@ Por tanto:
   coloca LIBRE (con `start`), no en secuencia: una capa es un objeto puesto
   encima, no un eslabón.
 - `Proyecto.capas: Vec<Capa>` con `pista: u8` — **el modelo de DaVinci**:
-  tres pistas de vídeo encima de la base (V2, V3, V4), cada una con sus
-  clips colocados libres, y la de arriba compone sobre la de abajo. El
-  apilado es (pista, orden); en la mesa sólo se dibujan las pistas usadas
-  más una libre — la pista aparece cuando la necesitas.
+  hasta OCHO pistas de vídeo encima de la base (V2..V9 = `plan::MAX_CAPAS`),
+  cada una con sus clips colocados libres, y la de arriba compone sobre la
+  de abajo. El apilado es (pista, orden); en la mesa sólo se dibujan las
+  pistas usadas más una libre — la pista aparece cuando la necesitas — y el
+  banco CRECE con ellas (la mesa le roba alto al visor, no al revés).
 - `Clip.anidada: Option<String>` — la clave de la bobina hija. La hija se
   carga en `Proyecto.subbobinas` al abrir (y al volver de editarla), con
   profundidad ≤ 3 y guarda de ciclos.
-- `PISTAS_MUSICA` se queda en 3: el carril nuevo es el de la capa, y un
-  cuarto carril de música no cabía en el banco sin robarle sitio a la mesa.
+- `PISTAS_MUSICA` sube a 8 con el mismo gesto: se ven los carriles usados
+  más uno libre (nunca menos de tres, que es la mesa de siempre) y el banco
+  gana el alto que pidan. El ciclo «al carril →» recorre los visibles.
 
 ## 3 · El plan (core/plan.rs)
 
@@ -156,6 +159,17 @@ Por tanto:
 
 ✅ = visto correr · ⧗ = escrito y compila, falta verlo en su máquina.
 
+- ✅ **pistas ilimitadas (3-ago)**: el renglón generalizado a `capas[8]`,
+  `PISTAS_CAPA = PISTAS_MUSICA = 8`, la preview con un búfer por hueco y
+  SIN el recorte a dos, el banco dinámico (la mesa crece con los carriles y
+  la esquina del sonido queda anclada al fondo). Visto correr: prueba de
+  ácido con 6 capas a la vez (2 PiP + 4 rótulos sobre la base) en el máster
+  Y en la preview, con los carriles V2..V8 en la mesa.
+- ✅ **la trampa del 8-bit (3-ago)**: la prueba de ácido destapó que TODO
+  H.264 de 8 bits salía doblado y con los colores rotos en el máster del
+  Mac (MOTOR §9quater): `importa()` leía NV12 como R16. Ahora pregunta el
+  formato al buffer. El material del autor (HEVC 10 bits) nunca lo vio.
+
 - ✅ **el plan**: renglón con C y D, capas por fotograma con rampas, matriz
   explícita, dependencias de tramos — 27 tests, incluidos el aplanado a dos
   niveles contra cuentas a mano y la guarda de ciclos
@@ -178,8 +192,11 @@ Por tanto:
 
 ## Los límites que quedan, dichos claros
 
-- dos capas COMPUESTAS por fotograma (C y D): tres solapadas a la vez → se
-  quedan las dos de encima;
+- ocho pistas de vídeo sobre la base y ocho carriles de música; las OCHO
+  capas componen A LA VEZ (más de ocho solapadas → se quedan las de
+  encima). En Windows, las capas de VÍDEO simultáneas son dos por los
+  anillos de decodificación (fotos y rótulos RGBA, sin límite); si un
+  fotograma pide más, el motor avisa y dibuja las dos de más arriba;
 - la cadencia de una capa de vídeo va al fotograma más cercano (la gemela es
   del carril base);
 - la preview resuelve UN nivel de anidado (el máster, tres) y no compone el

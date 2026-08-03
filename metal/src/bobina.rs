@@ -194,7 +194,7 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     // dos fuentes a la vez, pero el hilo lleva ventaja acumulada del clip que
     // se está yendo, así que el pico se amortiza en vez de dar un tirón.
     struct Servido { ren: crate::plan::Renglon, a: Option<Cuadro>, b: Option<Cuadro>,
-                     c: Option<Cuadro>, d: Option<Cuadro> }
+                     capas: Vec<Option<Cuadro>> }
     unsafe impl Send for Servido {}
     let total = plan.renglones.len();
     let renglones = plan.renglones.clone();
@@ -207,14 +207,12 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
             let b = if ren.fuente_b != NINGUNA {
                 cines[ren.fuente_b as usize].as_mut().and_then(|c| c.en(ren.t_b))
             } else { None };
-            // LA CAPA: si es vídeo, su fotograma; una foto no decodifica nada
-            let c = if ren.fuente_c != NINGUNA {
-                cines[ren.fuente_c as usize].as_mut().and_then(|x| x.en(ren.t_c))
-            } else { None };
-            let d = if ren.fuente_d != NINGUNA {
-                cines[ren.fuente_d as usize].as_mut().and_then(|x| x.en(ren.t_d))
-            } else { None };
-            if ftx.send(Servido { ren: *ren, a, b, c, d }).is_err() { break; }
+            // LAS CAPAS: las de vídeo, su fotograma; una foto no decodifica
+            let capas: Vec<Option<Cuadro>> = ren.capas.iter().map(|cp| {
+                if cp.fuente == NINGUNA { return None }
+                cines[cp.fuente as usize].as_mut().and_then(|x| x.en(cp.t))
+            }).collect();
+            if ftx.send(Servido { ren: *ren, a, b, capas }).is_err() { break; }
         }
     });
 
@@ -229,7 +227,7 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     let (mut t_esp, mut t_gpu, mut t_env) = (0.0f64, 0.0f64, 0.0f64);
     let mut reloj = Instant::now();
     let mut frx = frx.into_iter();
-    while let Some(servido) = { let r = frx.next(); t_esp += reloj.elapsed().as_secs_f64(); r } {
+    while let Some(mut servido) = { let r = frx.next(); t_esp += reloj.elapsed().as_secs_f64(); r } {
         let t = hechos;
         reloj = Instant::now();
         let ren = &servido.ren;
@@ -319,22 +317,19 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
         // obturador, A y B escriben en h_b y la capa tiene que caer AHÍ
         // MISMO — así que lleva el pad0 del que manda (elige destino) con
         // pad1 = 1 (no arrastra historia: un rótulo no es luz de escena).
-        for (fk, tk, ak, cua) in [
-            (ren.fuente_c, ren.t_c, ren.alfa_c, servido.c),
-            (ren.fuente_d, ren.t_d, ren.alfa_d, servido.d),
-        ] {
-            let _ = tk;
-            if fk == NINGUNA { continue }
-            let ic = fk as usize;
+        for (hueco, cp) in ren.capas.iter().enumerate() {
+            if cp.fuente == NINGUNA { continue }
+            let ic = cp.fuente as usize;
             let mut g = puestos[ic].grade;
-            g.peso = ak;
+            g.peso = cp.alfa;
             g.pad0 = puestos[manda].shutter;
             g.pad1 = 1.0;
             if let Some(t_rgba) = puestos[ic].capa_rgba.clone() {
                 r.revela_capa(cmd, &sin_imagen.0, &sin_imagen.1, &g,
                               &puestos[ic].lut_a.clone(),
                               &puestos[ic].lut_b.clone(), Some(&t_rgba));
-            } else if let Some(cua) = cua {
+            } else if let Some(cua) = servido.capas.get_mut(hueco)
+                .and_then(|x| x.take()) {
                 if let Some((ty, tuv)) = importa(&tex_cache, cua.pb) {
                     r.revela_en(cmd, &ty, &tuv, &g,
                                 &puestos[ic].lut_a.clone(),
@@ -439,11 +434,39 @@ fn cache_de_texturas(gpu: &Gpu) -> CVMetalTextureCacheRef {
     c
 }
 
-/// los dos planos de un CVPixelBuffer como texturas, sin copiar un byte
+/// los dos planos de un CVPixelBuffer como texturas, sin copiar un byte.
+///
+/// EL FORMATO SE LE PREGUNTA AL BUFFER, no se supone: HEVC 10 bits llega
+/// como x420 (planos de 16 bits) pero H.264 de 8 bits llega como 420v/420f
+/// (NV12, planos de 8). Importar NV12 como R16/RG16 daba la imagen DOBLADA
+/// en horizontal con los colores rotos — cada texel de 16 bits se comía dos
+/// píxeles de 8. Ambos muestrean a [0,1], así que el shader no se entera.
 fn importa(cache: &CVMetalTextureCacheRef, pb: CVPixelBufferRef)
            -> Option<(metal::Texture, metal::Texture)> {
-    let w = unsafe { CVPixelBufferGetWidth(pb) };
-    let h = unsafe { CVPixelBufferGetHeight(pb) };
+    let w = unsafe { CVPixelBufferGetWidthOfPlane(pb, 0) };
+    let h = unsafe { CVPixelBufferGetHeightOfPlane(pb, 0) };
+    let wc = unsafe { CVPixelBufferGetWidthOfPlane(pb, 1) };
+    let hc = unsafe { CVPixelBufferGetHeightOfPlane(pb, 1) };
+    let pf = unsafe { CVPixelBufferGetPixelFormatType(pb) };
+    {
+        // el parte de formatos: una línea POR FORMATO DISTINTO en todo el
+        // revelado (420v y x420 se alternan fuente/salida y no es plan
+        // cantarlo 150 veces)
+        static VISTOS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+        let mut v = VISTOS.lock().unwrap();
+        if !v.contains(&pf) {
+            eprintln!("   planos '{}': {}×{} (croma {}×{}, bpr {})",
+                      String::from_utf8_lossy(&pf.to_be_bytes()), w, h, wc, hc,
+                      unsafe { CVPixelBufferGetBytesPerRowOfPlane(pb, 0) });
+            v.push(pf);
+        }
+    }
+    let ocho = pf == u32::from_be_bytes(*b"420v") || pf == u32::from_be_bytes(*b"420f");
+    let (fy, fuv) = if ocho {
+        (metal::MTLPixelFormat::R8Unorm, metal::MTLPixelFormat::RG8Unorm)
+    } else {
+        (metal::MTLPixelFormat::R16Unorm, metal::MTLPixelFormat::RG16Unorm)
+    };
     let uno = |plano: usize, fmt: u64, pw: usize, ph: usize| -> Option<metal::Texture> {
         let mut ct: CVMetalTextureRef = std::ptr::null_mut();
         let st = unsafe {
@@ -458,8 +481,7 @@ fn importa(cache: &CVMetalTextureCacheRef, pb: CVPixelBufferRef)
         unsafe { CFRelease(ct as *mut std::ffi::c_void) };
         Some(t)
     };
-    match (uno(0, metal::MTLPixelFormat::R16Unorm as u64, w, h),
-           uno(1, metal::MTLPixelFormat::RG16Unorm as u64, w / 2, h / 2)) {
+    match (uno(0, fy as u64, w, h), uno(1, fuv as u64, wc, hc)) {
         (Some(a), Some(b)) => Some((a, b)),
         _ => None,
     }

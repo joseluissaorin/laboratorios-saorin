@@ -575,7 +575,7 @@ fn run(
     let es_video_capa = |b: &PlanWin, f: u32| f != filmlook_core::plan::NINGUNA
         && !b.plan.fuentes[f as usize].foto && !b.plan.fuentes[f as usize].hueco;
     let hay_capa_video = bob.as_ref().map(|b| b.plan.renglones.iter()
-        .any(|r| es_video_capa(b, r.fuente_c) || es_video_capa(b, r.fuente_d)))
+        .any(|r| r.capas.iter().any(|c| es_video_capa(b, c.fuente))))
         .unwrap_or(false);
     let mut haz_carril = || -> Result<(Vec<Slot>, Vec<(ID3D11Texture2D, HANDLE)>,
                                        Vec<Option<ID3D12CommandList>>)> {
@@ -691,36 +691,37 @@ fn run(
             }
         }
         // ── LAS CAPAS DE VÍDEO: mismo trato que el lado B ────────────────
-        let mut c_slot: Option<usize> = None;
-        let mut d_slot: Option<usize> = None;
+        // hasta DOS capas de vídeo simultáneas van por los anillos C y D;
+        // las RGBA (fotos y rótulos) no tienen límite porque van residentes.
+        // Una tercera de vídeo A LA VEZ se avisa y no se dibuja (anotado).
+        let mut c_slot: Option<(usize, usize)> = None;   // (hueco, anillo)
+        let mut d_slot: Option<(usize, usize)> = None;
         if let Some(r) = &ren {
-            if r.fuente_c != filmlook_core::plan::NINGUNA && !ins_c.is_empty() {
-                let ic = r.fuente_c as usize;
+            let mut videos = r.capas.iter().enumerate()
+                .filter(|(_, cp)| cp.fuente != filmlook_core::plan::NINGUNA
+                        && puestos[cp.fuente as usize].dec.is_some());
+            for (destino, carril_ins, carril_owns, carril_pre, carril_held) in [
+                (&mut c_slot, &ins_c, &owns_c, &pre_c, &mut held_c),
+                (&mut d_slot, &ins_d, &owns_d, &pre_d, &mut held_d),
+            ] {
+                let Some((hueco, cp)) = videos.next() else { break };
+                if carril_ins.is_empty() { continue }
+                let ic = cp.fuente as usize;
                 if let Some(fc) = puestos[ic].dec.as_mut()
-                    .and_then(|dv| dv.en(r.t_c).ok().flatten()) {
+                    .and_then(|dv| dv.en(cp.t).ok().flatten()) {
                     let k = n % M;
-                    unsafe { d.ctx.CopyResource(&owns_c[k].0, &fc.tex) };
+                    unsafe { d.ctx.CopyResource(&carril_owns[k].0, &fc.tex) };
                     unsafe { ctx4_main.Signal(&f_in11, n as u64 + 1)? };
                     unsafe { d.ctx.Flush() };
-                    held_c.push_back(fc);
-                    if held_c.len() > M { held_c.pop_front(); }
-                    unsafe { queue12.ExecuteCommandLists(&[pre_c[k].clone()]) };
-                    c_slot = Some(k);
+                    carril_held.push_back(fc);
+                    if carril_held.len() > M { carril_held.pop_front(); }
+                    unsafe { queue12.ExecuteCommandLists(&[carril_pre[k].clone()]) };
+                    *destino = Some((hueco, k));
                 }
             }
-            if r.fuente_d != filmlook_core::plan::NINGUNA && !ins_d.is_empty() {
-                let id2 = r.fuente_d as usize;
-                if let Some(fd) = puestos[id2].dec.as_mut()
-                    .and_then(|dv| dv.en(r.t_d).ok().flatten()) {
-                    let k = n % M;
-                    unsafe { d.ctx.CopyResource(&owns_d[k].0, &fd.tex) };
-                    unsafe { ctx4_main.Signal(&f_in11, n as u64 + 1)? };
-                    unsafe { d.ctx.Flush() };
-                    held_d.push_back(fd);
-                    if held_d.len() > M { held_d.pop_front(); }
-                    unsafe { queue12.ExecuteCommandLists(&[pre_d[k].clone()]) };
-                    d_slot = Some(k);
-                }
+            if videos.next().is_some() {
+                eprintln!("   ⚠ más de dos capas de VÍDEO a la vez: en Windows \
+                           se dibujan las dos de encima (las RGBA no cuentan)");
             }
         }
         let cmd = match &ren {
@@ -778,28 +779,33 @@ fn run(
                 // `peso = alfa` de la capa; el alfa por píxel de un RGBA lo
                 // multiplica el shader. pad1 = 1: un rótulo no arrastra
                 // historia del obturador.
-                for (ci, (fk, ak, kslot, ring)) in [
-                    (r.fuente_c, r.alfa_c, c_slot, &ins_c),
-                    (r.fuente_d, r.alfa_d, d_slot, &ins_d),
-                ].into_iter().enumerate() {
-                    if fk == filmlook_core::plan::NINGUNA { continue }
-                    let ic = fk as usize;
+                for (hueco, cp) in r.capas.iter().enumerate() {
+                    if cp.fuente == filmlook_core::plan::NINGUNA { continue }
+                    let ic = cp.fuente as usize;
                     let mut gc = puestos[ic].gu;
                     gc.pad0 = 0.0;
                     gc.pad1 = 1.0;
-                    gc.peso = ak;
+                    gc.peso = cp.alfa;
                     let (lc2, ld2) = (puestos[ic].lut_a, puestos[ic].lut_b);
                     let (vc2, vd2) = (luts_cat[lc2].1.clone(), luts_cat[ld2].1.clone());
-                    let carril = 2 + ci as u64;
+                    // el carril del bind group: 2 + hueco (cada capa el suyo)
+                    let carril = 2 + hueco as u64;
                     if let Some(v) = puestos[ic].capa_rgba.clone() {
                         ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
                                        &slot.y_view, &slot.uv_view, &gc,
                                        Some((&vc2, &vd2)),
                                        (n % N) as u64, carril, true,
                                        Some(&v), ic as u64);
-                    } else if let Some(k) = kslot {
+                    } else if let Some((_, k)) = c_slot
+                        .filter(|(h, _)| *h == hueco) {
                         ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
-                                       &ring[k].y_view, &ring[k].uv_view, &gc,
+                                       &ins_c[k].y_view, &ins_c[k].uv_view, &gc,
+                                       Some((&vc2, &vd2)),
+                                       k as u64, carril, true, None, ic as u64);
+                    } else if let Some((_, k)) = d_slot
+                        .filter(|(h, _)| *h == hueco) {
+                        ch.revela_capa(&gpu.device, &gpu.queue, &mut enc2,
+                                       &ins_d[k].y_view, &ins_d[k].uv_view, &gc,
                                        Some((&vc2, &vd2)),
                                        k as u64, carril, true, None, ic as u64);
                     }

@@ -151,6 +151,6 @@ y lo que queda sin aislar, en [`MOTOR.md` §9quater](MOTOR.md).
 
 ## Lo único que sigue pendiente
 
-▢ **16. Títulos y textos con su propia pista de vídeo.** El camino está
-estudiado y escrito arriba; siguen siendo seis ficheros y una recompilación de
-Windows para poder verlo.
+▢ **Windows, recompilar y ver.** Todo lo de arriba está hecho y visto en el
+Mac; la tanda de capas/pistas (y su mitad winlab, escrita) espera a que el
+GPD esté encendido para compilarse, pasarse la prueba de ácido e instalarse.
