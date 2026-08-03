@@ -56,7 +56,8 @@ Por tanto:
 - `Clip.anidada: Option<String>` — la clave de la bobina hija. La hija se
   carga en `Proyecto.subbobinas` al abrir (y al volver de editarla), con
   profundidad ≤ 3 y guarda de ciclos.
-- `PISTAS_MUSICA`: 3 → 4.
+- `PISTAS_MUSICA` se queda en 3: el carril nuevo es el de la capa, y un
+  cuarto carril de música no cabía en el banco sin robarle sitio a la mesa.
 
 ## 3 · El plan (core/plan.rs)
 
