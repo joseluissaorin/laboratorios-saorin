@@ -2536,6 +2536,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "filmlook-core",
+ "image",
  "pollster",
  "serde_json",
  "wgpu",

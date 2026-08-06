@@ -1060,6 +1060,45 @@ contenido en HEVC 10 bits, idéntico antes y después.
 
 ---
 
+## 12. LA COPIA — un fotograma en papel (3-ago-2026)
+
+La ampliadora del cuarto oscuro: sacar EL fotograma que se está mirando, con
+su receta, sus capas y su encuadre, revelado por el mismo motor que la bobina.
+
+**Por qué no vale sacarlo del máster con ffmpeg.** Medido sobre el mismo
+fotograma (testsrc2, baño de la casa, 1920×1080): la copia contra el
+fotograma extraído del máster da **36,3 dB**. Y la misma copia pasada sólo
+por `yuv420p` y de vuelta da **36,2 dB**. O sea: *toda* la diferencia es el
+**croma a la mitad**; el códec a 60 Mb/s no aporta ni 0,2 dB. La copia se
+salta las tres pérdidas del máster —submuestreo de croma, rango limitado y
+códec— porque sale del lienzo del comp en RGB de 10 bits, antes de empaquetar.
+
+**Cómo.** Si la salida del motor termina en `.png`, no hay codificador: se
+revela igual y el ÚLTIMO renglón se lee de la GPU (`lee_rgb16`, un blit a
+búfer y `v<<6 | v>>4`, que es la conversión exacta de 10 a 16 bits) y se
+escribe en PNG de 16 bits. El motor no sabe hacer otra cosa: JPEG, PNG de 8
+y el reducido del supermuestreo los saca el taller convirtiendo ESE fichero,
+así que sólo hay un sitio donde se pueda perder calidad y está a la vista.
+
+**La carrerilla no es un adorno.** Con obturador el arrastre se forma con los
+fotogramas anteriores, así que la copia pide 12 renglones de carrerilla: sin
+ellos saldría más limpia que el máster en ese mismo segundo, o sea mentiría.
+
+**El índice del fotograma, arreglado de paso.** El grano y el vaivén de la
+ventanilla se siembran con el NÚMERO de fotograma, y un tramo suelto empezaba
+a contar desde cero: la copia (y cualquier tramo de la caché fina) traía otro
+grano que la bobina entera. Ahora el primer renglón del tramo viaja en
+`FL_INDICE0` y el comp recibe el índice absoluto. Medido: la copia contra el
+máster pasó de 34,4 a 36,3 dB sólo con eso — los 1,9 dB eran grano y vaivén
+distintos.
+
+**En Windows** el lienzo del comp ya existía (`out_rgb`, el parche del comp
+escribe RGB en el destino 0 y el plano Y en el 1), así que la copia se lee de
+ahí igual que en el Mac; el codificador sigue su curso a un temporal que se
+tira. Compila (comprobado en cruzado desde el Mac); falta verlo correr.
+
+---
+
 ## 10. Riesgos, con su salida
 
 | riesgo | salida |

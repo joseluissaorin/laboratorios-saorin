@@ -2001,7 +2001,7 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::Enter) => {
                             e.revelar = None;
-                            e.revela(&self.proyecto, sel);
+                            e.revela(&self.proyecto, sel, None);
                         }
                         _ => {}
                     }
@@ -2081,7 +2081,7 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::Enter) => {
                             let p = e.preset_revelado;
-                            e.revela(&self.proyecto, p);
+                            e.revela(&self.proyecto, p, None);
                         }
                         _ => {}
                     }
@@ -2986,7 +2986,7 @@ impl Estado {
             A::Mesa => self.va_a(Sala::Mesa),
             A::CuartoOscuro => self.va_a(Sala::CuartoOscuro),
             A::Revelado => self.va_a(Sala::Revelado),
-            A::Revelar => { let k = self.preset_revelado; self.revela(pr, k); }
+            A::Revelar => { let k = self.preset_revelado; self.revela(pr, k, None); }
             A::Chuleta => self.chuleta = !self.chuleta,
             A::Ajustes => { self.ajustes = !self.ajustes; }
             A::Acerca => self.di("Laboratorios Saorín · un taller de revelado · MIT"),
@@ -4111,6 +4111,39 @@ impl Estado {
         self.di(&format!("stock {} sobre el baño", STOCKS[k].0));
     }
 
+    /// LOS TAMAÑOS DE LA COPIA: el lienzo, el doble y el cuádruple. Con el
+    /// lienzo la copia sale SUPERMUESTREADA (se revela al doble y se reduce:
+    /// el grano y los bordes salen sin escalones); los grandes salen
+    /// directos, porque a ×4 el doble ya no cabe en ningún codificador y
+    /// además la resolución sola ya trae el detalle del material.
+    const COPIA_TAM: [(&'static str, u32, f64); 3] = [
+        ("el lienzo · supermuestreada", 1, 2.0),
+        ("el doble", 2, 1.0),
+        ("el cuádruple", 4, 1.0),
+    ];
+    /// EL PAPEL: en qué se escribe la copia. El motor siempre da PNG de 16
+    /// bits (sin pérdida); los otros dos salen de convertir ESE fichero.
+    const COPIA_PAPEL: [(&'static str, &'static str); 3] = [
+        ("PNG · 16 bits", "png16"),
+        ("PNG · 8 bits", "png8"),
+        ("JPEG · calidad 95", "jpg"),
+    ];
+
+    /// LA AMPLIADORA, en un solo sitio (la lección de la sala de revelado:
+    /// si el dibujo y el ratón llevan cada uno sus números, se separan solos).
+    /// Va DEBAJO DEL VIDRIO: la copia se saca donde estás mirando la imagen.
+    /// Devuelve (tamaño, papel, botón).
+    fn ampliadora(gx: f32, gy_abajo: f32, gw: f32)
+                  -> ((f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32)) {
+        let y = gy_abajo + 26.0;
+        let w = (gw.min(760.0) - 12.0).max(360.0);
+        let c = gx + (gw - w) / 2.0;
+        let ancho_cel = (w - 190.0) / 2.0;
+        ((c, y, ancho_cel - 8.0, 24.0),
+         (c + ancho_cel, y, ancho_cel - 8.0, 24.0),
+         (c + w - 180.0, y - 4.0, 180.0, 32.0))
+    }
+
     /// EL CUARTO OSCURO (NORTE §4) — papel tiza, luz de seguridad, la imagen
     /// retroiluminada y el panel de instrumentos
     fn dibuja_cuarto(&mut self, pr: &Proyecto, d: &mut ui::Dibujo, dt: &mut ui::DibujoTex,
@@ -4136,6 +4169,37 @@ impl Estado {
         d.rect(gx, gy, gw, gh, paleta::NEGRO);
         let (vw, vh) = self.visor.encaje(gw, gh);
         self.visor.rect_pantalla = [gx + (gw - vw) / 2.0, gy + (gh - vh) / 2.0, vw, vh];
+
+        // ── LA AMPLIADORA: sacar ESTE fotograma en papel ────────────────
+        // El revelado saca la bobina; la ampliadora saca UNA imagen — la que
+        // se está mirando, con su receta, sus capas y su encuadre, revelada
+        // por el mismo motor. No es un fotograma robado del máster: no pasa
+        // por el códec ni por el YUV de rango limitado.
+        {
+            let (r_tam, r_pap, r_bot) = Self::ampliadora(gx, gy + gh, gw);
+            let (pw2, ph2) = self.lienzo_del_master(pr);
+            let k = Self::COPIA_TAM[(self.master.copia_tam as usize).min(2)];
+            d.texto(r_tam.0, r_tam.1 - 15.0, "LA AMPLIADORA", 8.0, paleta::SAFE);
+            let celda = |d: &mut ui::Dibujo, r: (f32, f32, f32, f32),
+                         rot: &str, val: &str, orden: u32| {
+                trazo::caja(d, r.0, r.1, r.2, r.3, 1.1, paleta::SAFE_TENUE, orden);
+                d.texto(r.0 + 8.0, r.1 + 8.0, rot, 7.0, paleta::SAFE_TENUE);
+                d.texto(r.0 + 62.0, r.1 + 7.5, val, 8.5, paleta::SAFE);
+            };
+            celda(d, r_tam, "TAMAÑO",
+                  &format!("{} · {}×{}", k.0, pw2 * k.1, ph2 * k.1), 720);
+            celda(d, r_pap, "PAPEL",
+                  Self::COPIA_PAPEL[(self.master.copia_papel as usize).min(2)].0, 721);
+            let sacando = self.revelando.is_some();
+            trazo::caja(d, r_bot.0, r_bot.1, r_bot.2, r_bot.3, 1.5,
+                        if sacando { paleta::SAFE_TENUE } else { paleta::SAFE_VIVO }, 722);
+            d.texto(r_bot.0 + 26.0, r_bot.1 + 11.0,
+                    if sacando { "REVELANDO…" } else { "SACAR LA COPIA" }, 9.5,
+                    if sacando { paleta::SAFE_TENUE } else { paleta::SAFE_VIVO });
+            d.texto(r_tam.0, r_bot.1 + 36.0,
+                    "la copia sale a copias/ · el fotograma de la aguja, con su receta",
+                    7.0, paleta::SAFE_TENUE);
+        }
 
         // ── la cabecera de la receta: ENTRADA · COLOR · EL CAJÓN ──
         let fx = izq_w + 30.0;
@@ -4383,6 +4447,39 @@ impl Estado {
         let ix = ancho - panel_w;
         let idx = self.bajo_aguja(pr);
         let fx = izq_w + 30.0;
+        // ── LA AMPLIADORA (debajo del vidrio) ──────────────────────────
+        // La misma geometría que la dibuja; se mira ANTES que nada porque
+        // cae en el hueco entre el vidrio y el transporte, donde no hay
+        // nada más que pulsar.
+        {
+            let zona_w = ancho - izq_w - panel_w - 60.0;
+            let zona_h = alto - Self::CABECERA - 170.0;
+            let prop = pr.proporcion();
+            let (mut gw, mut gh) = (zona_w, zona_w / prop);
+            if gh > zona_h { gh = zona_h; gw = gh * prop; }
+            let gx = izq_w + 30.0 + (zona_w - gw) / 2.0;
+            let gy = Self::CABECERA + 50.0 + (zona_h - gh) / 2.0;
+            let (r_tam, r_pap, r_bot) = Self::ampliadora(gx, gy + gh, gw);
+            let dentro = |r: (f32, f32, f32, f32)|
+                mx >= r.0 && mx <= r.0 + r.2 && my >= r.1 && my <= r.1 + r.3;
+            if dentro(r_tam) {
+                self.master.copia_tam = (self.master.copia_tam + 1) % 3;
+                prefs::guarda_master(&pr.base, &self.master);
+                self.visor.foley(sonido::Foley::Tick);
+                self.di(&format!("la copia sale {}",
+                                 Self::COPIA_TAM[self.master.copia_tam as usize].0));
+                return;
+            }
+            if dentro(r_pap) {
+                self.master.copia_papel = (self.master.copia_papel + 1) % 3;
+                prefs::guarda_master(&pr.base, &self.master);
+                self.visor.foley(sonido::Foley::Tick);
+                self.di(&format!("en {}",
+                                 Self::COPIA_PAPEL[self.master.copia_papel as usize].0));
+                return;
+            }
+            if dentro(r_bot) { self.saca_copia(pr); return; }
+        }
         // el cajón abierto: poner gelatinas o cerrarlo
         if self.cajon {
             let cy0 = Self::CABECERA + 50.0;
@@ -4972,7 +5069,7 @@ impl Estado {
                 self.di("revelado cancelado (la tira, fuera)");
             } else {
                 let p = self.preset_revelado;
-                self.revela(pr, p);
+                self.revela(pr, p, None);
             }
             return;
         }
@@ -6676,9 +6773,23 @@ impl Estado {
         format!("{base}{tramo}_{anio:04}{mes:02}{dia:02}-{hh:02}{mm:02}")
     }
 
-    fn revela(&mut self, pr: &Proyecto, preset: usize) {
+    /// SACAR LA COPIA (la ampliadora del cuarto oscuro): el fotograma que se
+    /// está mirando, revelado por el MISMO motor que la bobina —misma receta,
+    /// mismas capas, mismo encuadre, mismo grano— y escrito como imagen. No
+    /// es un fotograma robado del máster: no pasa por el códec ni por el YUV
+    /// de rango limitado con el croma a la mitad.
+    fn saca_copia(&mut self, pr: &Proyecto) {
+        let t = self.visor.t;
+        self.revela(pr, self.preset_revelado, Some(t));
+    }
+
+    fn revela(&mut self, pr: &Proyecto, preset: usize, copia: Option<f64>) {
         if pr.clips.is_empty() { self.di("la bobina está vacía"); return; }
         if self.revelando.is_some() {
+            if copia.is_some() {
+                self.di("espera: hay un revelado en marcha");
+                return;
+            }
             self.cola_revelado.push(preset);
             self.di(&format!("a la cola: {} lata(s) esperando", self.cola_revelado.len()));
             return;
@@ -6703,6 +6814,17 @@ impl Estado {
         } else {
             (0, 1.0, 60, String::new())
         };
+        // LA COPIA manda sobre el sello: su tamaño y su supermuestreo salen de
+        // la ampliadora, no del cajón del revelado (son dos cosas distintas y
+        // compartir botón acaba en un 8K puesto sin querer).
+        let (alto, sup, filtro) = match copia {
+            Some(_) => {
+                let (_, mult, sp) = Self::COPIA_TAM[(self.master.copia_tam as usize).min(2)];
+                let (_, ph_l) = self.lienzo_del_master(pr);
+                (ph_l as u32 * mult, sp, String::new())
+            }
+            None => (alto, sup, filtro),
+        };
         // LA CADENCIA DEL MÁSTER, también sólo «A MANO». Si es otra que la de
         // la bobina, el revelado interpola entre los dos fotogramas vecinos de
         // la fuente en vez de saltar al más cercano (plan.rs): es la
@@ -6718,7 +6840,9 @@ impl Estado {
         // El rango recorta la bobina que se manda: es lo prometido en
         // MOTOR §7 y lo que permite enseñar un trozo sin sacarla entera.
         let (ra, rb) = pr.tramo();
-        let solo_tramo = pr.rango.is_some();
+        // UNA COPIA NO SE RECORTA: se pide un instante de la bobina entera, y
+        // si el rango dejara fuera ese fotograma no habría copia que sacar
+        let solo_tramo = pr.rango.is_some() && copia.is_none();
         let inicios = pr.inicios();
         let clips: Vec<serde_json::Value> = pr.clips.iter().enumerate().filter_map(|(i, c)| {
             let ini = inicios.get(i).copied().unwrap_or(0.0);
@@ -6768,7 +6892,12 @@ impl Estado {
                 "alto": alto,
                 "super": sup,
                 // EL LABORATORIO: un fichero por plano en vez de una bobina
-                "sueltos": preset == EN_CLIPS,
+                "sueltos": preset == EN_CLIPS && copia.is_none(),
+                // LA COPIA: un fotograma, no una película (MOTOR §12)
+                "still": copia.map(|t| serde_json::json!({
+                    "t": t,
+                    "papel": Self::COPIA_PAPEL[(self.master.copia_papel as usize).min(2)].1,
+                })),
                 "bitrate": mbps as i64 * 1_000_000,
                 "filtro": filtro,
             },
@@ -7978,7 +8107,7 @@ impl Estado {
                 // ¿hay latas esperando en la cola? la siguiente, a la cubeta
                 if let Some(p) = self.cola_revelado.first().copied() {
                     self.cola_revelado.remove(0);
-                    self.revela(pr, p);
+                    self.revela(pr, p, None);
                 }
             }
         }

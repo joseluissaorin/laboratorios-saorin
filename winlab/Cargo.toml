@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# solo para escribir la COPIA del cuarto oscuro (PNG de 16 bits)
+image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"

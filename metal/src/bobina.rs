@@ -125,11 +125,17 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
         });
     }
 
-    // el codificador, al lienzo del proyecto. El sonido NO viene de aquí: la
-    // bobina puede tener veinte fuentes y su mezcla la hornea el taller con
-    // ffmpeg en una sola pasada al final (MOTOR §11).
-    let enc = VtEncoder::new(pw, ph, &plan.salida, "", plan.fps, plan.bitrate, 0.0)?;
-    let pool = enc.pool;
+    // ── ¿UN FOTOGRAMA? (MOTOR §12) ─────────────────────────────────────
+    // Si la salida es una IMAGEN no hay codificador ni película: se revela
+    // igual —la misma cadena, el mismo grano, las mismas capas— y el último
+    // renglón se lee de la GPU y se escribe. Los renglones anteriores son la
+    // carrerilla: dejan el arrastre del obturador formado, así que el
+    // fotograma sale IDÉNTICO al que tendría el máster en ese segundo.
+    let still = es_imagen(&plan.salida);
+    let enc = if still { None } else {
+        Some(VtEncoder::new(pw, ph, &plan.salida, "", plan.fps, plan.bitrate, 0.0)?)
+    };
+    let pool = enc.as_ref().map(|e| e.pool).unwrap_or(std::ptr::null_mut());
     let tex_cache = cache_de_texturas(&gpu);
     let sin_imagen = vacia(&gpu);   // una vez, no por fotograma
 
@@ -167,7 +173,7 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
               hondo * por_cuadro * 3 / 1_000_000);
     let (tx, rx) = std::sync::mpsc::sync_channel::<Trabajo>(hondo);
     let fps = plan.fps;
-    let hilo = std::thread::spawn(move || {
+    let hilo = enc.map(|enc| std::thread::spawn(move || {
         let mut n = 0i64;
         for Trabajo(cmd, pb, idx, cuadros, texturas) in rx {
             cmd.wait_until_completed();
@@ -181,7 +187,7 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
         }
         enc.finish(n);
         n
-    });
+    }));
 
     // ── EL HILO DE LAS FUENTES (MOTOR §6) ──────────────────────────────
     // Decodificar y componer se turnaban: la GPU esperaba al decodificador y
@@ -219,10 +225,16 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     // LA CARRERILLA: los primeros renglones se revelan y se tiran. Dejan la
     // historia del obturador con su arrastre ya formado, para que el tramo no
     // empiece con un escalón (MOTOR §7).
+    // el número de fotograma DE LA BOBINA (no el del tramo): es lo que
+    // siembra el grano y el vaivén, así que un tramo y la bobina entera
+    // tienen que dar el mismo
+    let indice0: usize = std::env::var("FL_INDICE0").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(0);
     let saltar: usize = std::env::var("FL_SALTAR").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(0);
     if saltar > 0 { eprintln!("   carrerilla: {saltar} fotograma(s) que no se escriben"); }
     let mut hechos = 0usize;
+    let mut escritos_still = 0usize;
     // el desglose que dice quién manda (MOTOR §9, contrato de medición)
     let (mut t_esp, mut t_gpu, mut t_env) = (0.0f64, 0.0f64, 0.0f64);
     let mut reloj = Instant::now();
@@ -352,13 +364,33 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
         r.comp_params.fundido = ren.nivel_color;
         r.comp_params.fundido_color = ren.color_fijo;
 
+        // EL FOTOGRAMA: se compone al lienzo y se lee de la GPU; ni pool ni
+        // empaquetado a YUV — un still no pasa por el codificador
+        if still {
+            r.compone(cmd, indice0 + t, plan.fps, None);
+            cmd.commit();
+            cmd.wait_until_completed();
+            drop(texs); drop(vivos);
+            t_gpu += reloj.elapsed().as_secs_f64();
+            reloj = Instant::now();
+            hechos += 1;
+            if hechos == total {
+                let (iw, ih, px) = crate::metal_pipe::lee_rgb16(&gpu, &r.targets.out);
+                escribe_imagen(&plan.salida, iw, ih, &px)?;
+                escritos_still += 1;
+            }
+            t_env += reloj.elapsed().as_secs_f64();
+            reloj = Instant::now();
+            continue;
+        }
+
         let Some(pb) = crate::encode_vt::alloc_from_pool(pool) else {
             anyhow::bail!("el pool del codificador se quedó sin búferes");
         };
         let Some((py, puv)) = importa(&tex_cache, pb) else {
             anyhow::bail!("no pude importar el fotograma de salida");
         };
-        r.compone(cmd, t, plan.fps, Some((&py, &puv)));
+        r.compone(cmd, indice0 + t, plan.fps, Some((&py, &puv)));
         cmd.commit();
         texs.push((py, puv));
         t_gpu += reloj.elapsed().as_secs_f64();
@@ -382,7 +414,15 @@ pub fn revela(plan: &Plan, luts: &mut dyn FnMut(Option<&str>, &str) -> (u64, Vec
     }
     drop(tx);
     let _ = fuentes.join();
-    let escritos = hilo.join().map_err(|_| anyhow::anyhow!("hilo del codificador"))?;
+    if still {
+        let el = t0.elapsed().as_secs_f64();
+        anyhow::ensure!(escritos_still == 1,
+                        "el fotograma no llegó a escribirse ({hechos} renglón/es revelados)");
+        eprintln!("\n✅ fotograma revelado: {pw}×{ph} en {el:.1}s                    ({} de carrerilla) → {}", hechos.saturating_sub(1), plan.salida);
+        return Ok(());
+    }
+    let escritos = hilo.expect("el codificador")
+        .join().map_err(|_| anyhow::anyhow!("hilo del codificador"))?;
     let el = t0.elapsed().as_secs_f64();
     let n = escritos.max(1) as f64;
     eprintln!("\n✅ bobina revelada: {escritos} fotogramas en {el:.1}s = {:.1} fps",
@@ -499,4 +539,27 @@ fn vacia(gpu: &Gpu) -> (metal::Texture, metal::Texture) {
         gpu.device.new_texture(&d)
     };
     (mk(MTLPixelFormat::R16Unorm), mk(MTLPixelFormat::RG16Unorm))
+}
+
+/// ¿la salida es una IMAGEN y no una película? Lo decide la extensión: es lo
+/// que el taller ya usa para todo lo demás y no hace falta una bandera más.
+fn es_imagen(salida: &str) -> bool {
+    // SOLO .png: el motor escribe siempre PNG de 16 bits, que es lo mejor que
+    // sabe dar. Los demás formatos (JPEG, PNG de 8, TIFF) los saca el taller
+    // convirtiendo ESTE fichero — así el motor tiene un solo camino y no hay
+    // dos sitios donde se pueda perder calidad.
+    salida.to_ascii_lowercase().ends_with(".png")
+}
+
+/// EL FOTOGRAMA A DISCO, en PNG de 16 bits por canal. Siempre 16: es sin
+/// pérdida y no cuesta casi nada; si el autor quiere JPEG o un PNG de 8, el
+/// taller lo convierte después (que para eso tiene ffmpeg). Aquí no se tira
+/// ni un bit de lo que la GPU ha calculado.
+fn escribe_imagen(ruta: &str, w: u32, h: u32, px: &[u16]) -> Result<()> {
+    let buf: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
+        image::ImageBuffer::from_raw(w, h, px.to_vec())
+            .ok_or_else(|| anyhow::anyhow!("el fotograma no cuadra: {w}×{h}"))?;
+    if let Some(d) = std::path::Path::new(ruta).parent() { std::fs::create_dir_all(d).ok(); }
+    buf.save(ruta).map_err(|e| anyhow::anyhow!("escribir {ruta}: {e}"))?;
+    Ok(())
 }

@@ -276,6 +276,45 @@ pub struct PassEncoder<'a> {
     pub enc: &'a RenderCommandEncoderRef,
 }
 
+/// EL FOTOGRAMA, LEÍDO DE LA GPU tal cual sale del comp: RGB de 10 bits
+/// llevado a 16 sin perder nada (el 10 se estira con sus propios bits altos,
+/// `v<<6 | v>>4`, que es la conversión exacta: 0→0 y 1023→65535).
+///
+/// Es MEJOR que sacar el fotograma del máster con ffmpeg, y por eso existe:
+/// el máster va a YUV 4:2:0 de rango limitado y con el códec encima; esto es
+/// RGB entero, sin submuestreo de croma, sin recorte de rango y sin códec.
+pub fn lee_rgb16(gpu: &Gpu, tex: &Texture) -> (u32, u32, Vec<u16>) {
+    let (w, h) = (tex.width(), tex.height());
+    debug_assert_eq!(tex.pixel_format(), MTLPixelFormat::RGB10A2Unorm);
+    // el ancho de fila que pide el blit, alineado a 256 por si acaso
+    let bpr = ((w * 4 + 255) / 256) * 256;
+    let buf = gpu.device.new_buffer(bpr * h, MTLResourceOptions::StorageModeShared);
+    let cmd = gpu.queue.new_command_buffer();
+    let blit = cmd.new_blit_command_encoder();
+    blit.copy_from_texture_to_buffer(
+        tex, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 },
+        MTLSize { width: w, height: h, depth: 1 },
+        &buf, 0, bpr, 0, MTLBlitOption::empty());
+    blit.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    let data = unsafe {
+        std::slice::from_raw_parts(buf.contents() as *const u8, (bpr * h) as usize)
+    };
+    let mut out = Vec::with_capacity((w * h * 3) as usize);
+    for f in 0..h as usize {
+        for c in 0..w as usize {
+            let o = f * bpr as usize + c * 4;
+            let v = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+            for k in 0..3 {
+                let d10 = ((v >> (10 * k)) & 0x3ff) as u16;
+                out.push((d10 << 6) | (d10 >> 4));
+            }
+        }
+    }
+    (w as u32, h as u32, out)
+}
+
 /// Vuelca una textura a PPM/PGM 8-bit para depurar (lento, solo debug).
 pub fn dump_texture(gpu: &Gpu, tex: &Texture, path: &str) {
     let (w, h) = (tex.width(), tex.height());

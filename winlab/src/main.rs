@@ -541,6 +541,8 @@ fn run(
 
     // LA CARRERILLA: los primeros renglones se revelan y se tiran, para que el
     // obturador llegue al tramo con su arrastre ya formado (MOTOR §7)
+    let indice0: usize = std::env::var("FL_INDICE0").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(0);
     let saltar: usize = std::env::var("FL_SALTAR").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(0);
     if saltar > 0 { eprintln!("   carrerilla: {saltar} fotograma(s) que no se escriben"); }
@@ -697,15 +699,23 @@ fn run(
         let mut c_slot: Option<(usize, usize)> = None;   // (hueco, anillo)
         let mut d_slot: Option<(usize, usize)> = None;
         if let Some(r) = &ren {
-            let mut videos = r.capas.iter().enumerate()
-                .filter(|(_, cp)| cp.fuente != filmlook_core::plan::NINGUNA
-                        && puestos[cp.fuente as usize].dec.is_some());
+            // LA LISTA, MATERIALIZADA: si se deja perezosa, el iterador se
+            // queda con `puestos` prestado y dentro del bucle hace falta
+            // prestarlo mutable para decodificar. Son ocho huecos: copiarlos
+            // no cuesta nada.
+            let videos: Vec<(usize, filmlook_core::plan::CapaR)> =
+                r.capas.iter().copied().enumerate()
+                    .filter(|(_, cp)| cp.fuente != filmlook_core::plan::NINGUNA
+                            && puestos[cp.fuente as usize].dec.is_some())
+                    .collect();
+            let mut videos = videos.into_iter();
             for (destino, carril_ins, carril_owns, carril_pre, carril_held) in [
                 (&mut c_slot, &ins_c, &owns_c, &pre_c, &mut held_c),
                 (&mut d_slot, &ins_d, &owns_d, &pre_d, &mut held_d),
             ] {
                 let Some((hueco, cp)) = videos.next() else { break };
                 if carril_ins.is_empty() { continue }
+                let cp = &cp;
                 let ic = cp.fuente as usize;
                 if let Some(fc) = puestos[ic].dec.as_mut()
                     .and_then(|dv| dv.en(cp.t).ok().flatten()) {
@@ -819,7 +829,7 @@ fn run(
                 ch.comp_u.fundido = r.nivel_color;
                 ch.comp_u.fundido_color = r.color_fijo;
                 ch.compone(&gpu.device, &gpu.queue, &mut enc2,
-                           &oslot.y_view, &oslot.uv_view, n, paso);
+                           &oslot.y_view, &oslot.uv_view, indice0 + n, paso);
                 enc2.finish()
             }
             _ => ch.encode_frame(
@@ -830,6 +840,18 @@ fn run(
             ),
         };
         let sub = gpu.queue.submit([cmd]);
+        // LA COPIA: el último renglón del plan se lee del lienzo y sale en
+        // papel. Va aquí —después del submit— para que la GPU haya hecho ya
+        // el comp de ESTE fotograma.
+        if let Some(ruta) = COPIA.lock().unwrap().clone() {
+            let ultimo = bob.as_ref()
+                .map(|b| n + 1 >= b.plan.renglones.len()).unwrap_or(false);
+            if ultimo {
+                gpu.device.poll(wgpu::Maintain::wait_for(sub.clone()));
+                let (cw, chh, px) = ch.lee_rgb16(&gpu.device, &gpu.queue);
+                escribe_copia(&ruta, cw, chh, px)?;
+            }
+        }
         unsafe { queue12.ExecuteCommandLists(&[post_lists[n % N].clone()]) };
         unsafe { queue12.Signal(&f_r12, n as u64 + 1)? };
         acc_gpu += t.elapsed().as_secs_f64() * 1e3;
@@ -1001,6 +1023,9 @@ fn revela_bobina(ruta: &str, luts_dir: Option<&str>,
         let fin = cuantos.map(|c| (d + c).min(plan.renglones.len()))
                          .unwrap_or(plan.renglones.len());
         plan.renglones = plan.renglones[ini..fin.max(ini)].to_vec();
+        // el índice del primer renglón: el grano y el vaivén son del número
+        // de fotograma DE LA BOBINA, no del sitio dentro del tramo
+        std::env::set_var("FL_INDICE0", ini.to_string());
         eprintln!("   tramo: renglones {d}..{fin} (+{saltar} de carrerilla)");
     }
     std::env::set_var("FL_SALTAR", saltar.to_string());
@@ -1026,9 +1051,43 @@ fn busca_lut(n: &str, ranura: &str, dir: Option<&str>) -> std::path::PathBuf {
 /// fuentes y las gelatinas) se abre dentro, en `prepara_bobina`.
 fn marcha(plan: filmlook_core::plan::Plan, luts_dir: Option<&str>,
           salida: String, bitrate: u32) -> Result<()> {
+    // ── ¿UNA COPIA? (MOTOR §12) ────────────────────────────────────────
+    // Si la salida es una IMAGEN, se revela igual —misma cadena, mismo
+    // grano, mismas capas— y el ÚLTIMO renglón se lee del lienzo del comp
+    // y se escribe en PNG de 16 bits. El codificador sigue su curso a un
+    // temporal que se tira: cambiarle el bucle entero al motor por una
+    // imagen sería mucho riesgo para muy poca prisa (son 13 fotogramas).
+    let imagen = salida.to_ascii_lowercase().ends_with(".png");
+    let destino_enc = if imagen {
+        *COPIA.lock().unwrap() = Some(salida.clone());
+        std::env::temp_dir().join("winlab_copia.mp4").to_string_lossy().to_string()
+    } else { salida.clone() };
     let bob = PlanWin { plan, luts_dir: luts_dir.map(String::from) };
-    run("", Some(salida), None, None, None, bitrate,
-        None, None, None, None, None, Some(bob))
+    let r = run("", Some(destino_enc.clone()), None, None, None, bitrate,
+                None, None, None, None, None, Some(bob));
+    if imagen {
+        let _ = std::fs::remove_file(&destino_enc);
+        if r.is_ok() && !std::path::Path::new(&salida).is_file() {
+            anyhow::bail!("la copia no llegó a escribirse");
+        }
+    }
+    r
+}
+
+/// LA COPIA PEDIDA: adónde va la imagen del último renglón (None = película).
+/// Es un global porque `run()` ya lleva doce parámetros y esto es una
+/// bandera de una sola pieza, no una opción más del bucle.
+static COPIA: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// escribe el lienzo en PNG de 16 bits por canal
+fn escribe_copia(ruta: &str, w: u32, h: u32, px: Vec<u16>) -> Result<()> {
+    let buf: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
+        image::ImageBuffer::from_raw(w, h, px)
+            .ok_or_else(|| anyhow::anyhow!("la copia no cuadra: {w}×{h}"))?;
+    if let Some(d) = std::path::Path::new(ruta).parent() { std::fs::create_dir_all(d).ok(); }
+    buf.save(ruta).map_err(|e| anyhow::anyhow!("escribir {ruta}: {e}"))?;
+    eprintln!("✅ copia revelada: {w}×{h} → {ruta}");
+    Ok(())
 }
 
 /// Abre las fuentes y sube las gelatinas CON EL DISPOSITIVO DEL BUCLE.

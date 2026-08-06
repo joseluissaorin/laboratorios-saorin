@@ -501,6 +501,11 @@ fn revela_bobina(ruta: &str, luts_dir: Option<&str>,
         let fin = cuantos.map(|c| (d + c).min(plan.renglones.len()))
                          .unwrap_or(plan.renglones.len());
         plan.renglones = plan.renglones[ini..fin.max(ini)].to_vec();
+        // EL ÍNDICE DEL PRIMER RENGLÓN, para que el grano y el vaivén de la
+        // ventanilla sean LOS DE ESE FOTOGRAMA y no los del principio del
+        // tramo: dependen del número de fotograma, así que un tramo suelto
+        // (o una copia) traía otro grano que la bobina entera.
+        std::env::set_var("FL_INDICE0", ini.to_string());
         eprintln!("   tramo: renglones {d}..{fin} (+{saltar} de carrerilla)");
     }
     std::env::set_var("FL_SALTAR", saltar.to_string());

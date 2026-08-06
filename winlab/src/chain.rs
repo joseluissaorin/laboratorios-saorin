@@ -47,7 +47,10 @@ fn mk_target(device: &wgpu::Device, w: u32, h: u32, fmt: wgpu::TextureFormat) ->
         mip_level_count: 1, sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: fmt,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC para poder LEER el lienzo (la copia del cuarto oscuro,
+        // MOTOR §12). No cuesta nada en un render target.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = tex.create_view(&Default::default());
@@ -382,6 +385,51 @@ uniform_entry(0, params::bytes_uniforme::<params::CompU>()),
 
     /// El resto de la cadena sobre lo que haya en la historia: pirámide,
     /// composición y empaquetado a los planos del codificador.
+    /// EL FOTOGRAMA, LEÍDO DE LA GPU: el lienzo del comp en RGB de 10 bits,
+    /// llevado a 16 sin perder nada (`v<<6 | v>>4` es la conversión exacta).
+    /// Es lo mismo que hace el motor del Mac, y por el mismo motivo: una
+    /// copia no debe pasar por el códec ni por el croma a la mitad.
+    pub fn lee_rgb16(&self, device: &wgpu::Device, queue: &wgpu::Queue)
+                     -> (u32, u32, Vec<u16>) {
+        let (w, h) = (self.out_rgb.w, self.out_rgb.h);
+        // wgpu exige que la fila del búfer sea múltiplo de 256 bytes
+        let bpr = ((w * 4 + 255) / 256) * 256;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("copia"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture { texture: &self.out_rgb.tex, mip_level: 0,
+                                     origin: wgpu::Origin3d::ZERO,
+                                     aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyBuffer { buffer: &buf,
+                layout: wgpu::ImageDataLayout { offset: 0,
+                    bytes_per_row: Some(bpr), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+        queue.submit([enc.finish()]);
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let datos = buf.slice(..).get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * 3) as usize);
+        for f in 0..h as usize {
+            for c in 0..w as usize {
+                let o = f * bpr as usize + c * 4;
+                let v = u32::from_le_bytes([datos[o], datos[o + 1],
+                                            datos[o + 2], datos[o + 3]]);
+                for k in 0..3 {
+                    let d10 = ((v >> (10 * k)) & 0x3ff) as u16;
+                    out.push((d10 << 6) | (d10 >> 4));
+                }
+            }
+        }
+        drop(datos);
+        buf.unmap();
+        (w, h, out)
+    }
+
     pub fn compone(
         &mut self,
         device: &wgpu::Device,

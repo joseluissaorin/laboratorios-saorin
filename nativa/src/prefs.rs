@@ -81,6 +81,11 @@ pub struct Master {
     pub filtro: String,
     /// cadencia del máster (0 = la de la bobina)
     pub fps: f64,
+    /// LA AMPLIADORA (el cuarto oscuro): a qué tamaño sale la copia
+    /// (0 = el lienzo, 1 = ×2, 2 = ×4) y en qué papel (0 = PNG 16 bits,
+    /// 1 = PNG 8, 2 = JPEG)
+    pub copia_tam: u32,
+    pub copia_papel: u32,
 }
 
 impl Default for Master {
@@ -88,7 +93,7 @@ impl Default for Master {
         // el camino de siempre: al lienzo de la bobina, sin escalar y con el
         // códec que mastica el chip. Cero pases de más.
         Master { alto: 0, sup: 1.0, codec: "hevc".into(), mbps: 60,
-                 filtro: "".into(), fps: 0.0 }
+                 filtro: "".into(), fps: 0.0, copia_tam: 0, copia_papel: 0 }
     }
 }
 
@@ -145,6 +150,8 @@ pub fn master_guardado(base: &std::path::Path) -> Master {
         mbps: m["mbps"].as_u64().unwrap_or(d.mbps as u64).clamp(5, 2000) as u32,
         filtro: m["filtro"].as_str().unwrap_or(&d.filtro).to_string(),
         fps: m["fps"].as_f64().unwrap_or(d.fps).clamp(0.0, 240.0),
+        copia_tam: m["copia_tam"].as_u64().unwrap_or(d.copia_tam as u64).min(2) as u32,
+        copia_papel: m["copia_papel"].as_u64().unwrap_or(d.copia_papel as u64).min(2) as u32,
     }
 }
 
@@ -156,6 +163,7 @@ pub fn guarda_master(base: &std::path::Path, m: &Master) {
     v["master"] = serde_json::json!({
         "alto": m.alto, "super": m.sup, "codec": m.codec,
         "mbps": m.mbps, "filtro": m.filtro, "fps": m.fps,
+        "copia_tam": m.copia_tam, "copia_papel": m.copia_papel,
     });
     let _ = std::fs::write(&p, serde_json::to_vec_pretty(&v).unwrap_or_default());
 }

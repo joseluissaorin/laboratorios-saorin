@@ -1710,6 +1710,14 @@ fn revela_bobina(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &st
         return revela_sueltos(&plan, d, rend, ffmpeg, &ruta_plan, out_name, out_ext, pfps);
     }
 
+    // ── UNA COPIA: EL FOTOGRAMA, no la película (MOTOR §12) ───────────
+    // La ampliadora del cuarto oscuro. Mismo plan y mismo motor; lo único
+    // distinto es que se pide UN renglón y que la salida es una imagen.
+    if !payload["master"]["still"].is_null() {
+        return revela_copia(&payload, &plan, d, rend, ffmpeg, &ruta_plan, out_name,
+                            pfps, parte.cadena, parte.salida);
+    }
+
     // ── LA CACHÉ DE LA BOBINA (MOTOR §7) ──────────────────────────────
     // El camino viejo cacheaba PIEZAS: cambiar el grade de un clip no
     // recalculaba los demás. El motor de bobina no tiene piezas, así que se
@@ -1805,6 +1813,105 @@ fn revela_bobina(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &st
 /// recorte, sin recodificar la imagen. Un plano sin su sonido no sirve para
 /// montar.
 #[allow(clippy::too_many_arguments)]
+/// LA COPIA: un fotograma revelado en papel (MOTOR §12).
+///
+/// El motor escribe SIEMPRE un PNG de 16 bits al lienzo de la cadena; aquí se
+/// reduce (si hubo supermuestreo) y se convierte al papel pedido. La copia es
+/// mejor que un fotograma sacado del máster con ffmpeg, y por eso existe: no
+/// pasa por el códec, ni por el submuestreo de croma, ni por el rango
+/// limitado del YUV.
+///
+/// LA CARRERILLA no es un adorno: con obturador (`shutter`) el arrastre se
+/// forma con los fotogramas anteriores. Sin ella, la copia de un plano en
+/// movimiento saldría más limpia que el máster en ese mismo segundo — o sea,
+/// mentiría sobre lo que va a salir.
+#[allow(clippy::too_many_arguments)]
+fn revela_copia(payload: &serde_json::Value, plan: &serde_json::Value, d: &Dirs,
+                rend: &Path, ffmpeg: &str, ruta_plan: &Path, out_name: &str,
+                pfps: f64, cadena: (u64, u64), salida: (u64, u64)) -> Result<(), String> {
+    let st = &payload["master"]["still"];
+    let t = st["t"].as_f64().unwrap_or(0.0).max(0.0);
+    let papel = st["papel"].as_str().unwrap_or("png16");
+    let comp = crate::plan::compila(plan).map_err(|e| e.to_string())?;
+    let total = comp.renglones.len();
+    if total == 0 { return Err("la bobina no tiene ni un fotograma".into()); }
+    // EL RENGLÓN DE ESE SEGUNDO. Se redondea al fotograma que el máster
+    // tendría ahí: la copia y el máster han de enseñar lo mismo.
+    let k = ((t * pfps).round() as usize).min(total - 1);
+    // la carrerilla que quepa: hasta 12 fotogramas antes
+    let carrerilla = k.min(12);
+    diario(&format!("LA COPIA: fotograma {k} de {total} (t={t:.3} s) \
+                     · carrerilla {carrerilla} · lienzo {}×{}", cadena.0, cadena.1));
+    set_render(|s| { s.state = "running".into(); s.step = "revelando el fotograma".into();
+                     s.pct = 0.2; });
+
+    let crudo = d.tmp.join("copia_cruda.png");
+    let _ = std::fs::remove_file(&crudo);
+    let mut cmd = quiet_cmd(rend.to_str().unwrap_or_default());
+    cmd.args(["bobina", ruta_plan.to_str().unwrap(),
+              "--luts", d.luts.to_str().unwrap(),
+              "--desde", &k.to_string(), "--cuantos", "1",
+              "--carrerilla", &carrerilla.to_string(),
+              "--out", crudo.to_str().unwrap()]);
+    run_logged(&mut cmd, "copia")?;
+    if !crudo.is_file() { return Err("el motor no escribió el fotograma".into()); }
+
+    // ── el papel y el tamaño ──────────────────────────────────────────
+    let ext = if papel == "jpg" { "jpg" } else { "png" };
+    let destino = payload["out_dir"].as_str()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir() || std::fs::create_dir_all(p).is_ok())
+        .unwrap_or_else(|| d.out.clone())
+        .join("copias");
+    std::fs::create_dir_all(&destino)
+        .map_err(|e| format!("no pude crear {}: {e}", destino.display()))?;
+    // el nombre lleva el SEGUNDO: dos copias del mismo plano no se pisan
+    let sello = format!("{out_name}_{:02}m{:06.3}s", (t / 60.0) as u64, t % 60.0)
+        .replace('.', "_");
+    let mut out_path = destino.join(format!("{sello}.{ext}"));
+    let mut n = 2;
+    while out_path.exists() {
+        out_path = destino.join(format!("{sello}_{n}.{ext}"));
+        n += 1;
+    }
+    set_render(|s| { s.step = "el papel".into(); s.pct = 0.8; });
+    // ¿hay algo que hacer? Si el papel es PNG de 16 y el lienzo ya es el
+    // tamaño pedido, el fichero del motor ES la copia: se mueve y punto.
+    let reducir = cadena != salida;
+    if papel == "png16" && !reducir {
+        std::fs::rename(&crudo, &out_path)
+            .or_else(|_| std::fs::copy(&crudo, &out_path).map(|_| ()))
+            .map_err(|e| format!("no pude dejar la copia: {e}"))?;
+    } else {
+        let mut c = quiet_cmd(ffmpeg);
+        c.args(["-v", "error", "-y", "-i", crudo.to_str().unwrap()]);
+        if reducir {
+            // lanczos: el mismo reductor que el máster supermuestreado
+            c.args(["-vf", &format!("scale={}:{}:flags=lanczos", salida.0, salida.1)]);
+        }
+        match papel {
+            "jpg" => { c.args(["-q:v", "2", "-pix_fmt", "yuvj444p"]); }
+            "png8" => { c.args(["-pix_fmt", "rgb24"]); }
+            _ => { c.args(["-pix_fmt", "rgb48be"]); }
+        }
+        c.arg(out_path.to_str().unwrap());
+        run_logged(&mut c, "papel")?;
+        let _ = std::fs::remove_file(&crudo);
+    }
+    let (fw, fh) = if reducir { salida } else { cadena };
+    let bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    diario(&format!("LA COPIA: {}×{fh} {papel} · {} KB → {}",
+                    fw, bytes / 1024, out_path.display()));
+    let ruta = out_path.to_string_lossy().to_string();
+    set_render(move |s| {
+        s.state = "done".into();
+        s.step = "la copia, en papel".into();
+        s.pct = 1.0;
+        s.out = ruta.clone();
+    });
+    Ok(())
+}
+
 fn revela_sueltos(payload: &serde_json::Value, d: &Dirs, rend: &Path, ffmpeg: &str,
                   ruta_plan: &Path, out_name: &str, out_ext: &str, pfps: f64)
     -> Result<(), String> {

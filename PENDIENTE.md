@@ -166,6 +166,21 @@ autor: de aquí no se borra un fichero nunca.
 ✅ Los ocho puntos de la revisión del shader y **el filtro ND**, con lo medido
 y lo que queda sin aislar, en [`MOTOR.md` §9quater](MOTOR.md).
 
+## §9 · LA AMPLIADORA (3-ago-2026)
+
+✅ **Sacar un fotograma en la calidad que se elija.** Va en EL CUARTO OSCURO,
+debajo del vidrio —que es donde se está mirando la imagen—, no en la sala de
+revelado (esa saca la bobina entera). Dos mandos que se ciclan con un clic:
+**tamaño** (el lienzo supermuestreado · el doble · el cuádruple, con los
+píxeles reales al lado) y **papel** (PNG 16 bits · PNG 8 · JPEG 95), y el
+botón. La copia sale a `copias/` con el segundo en el nombre.
+
+Con «el lienzo» la copia se revela AL DOBLE y se reduce con lanczos: el grano
+y los bordes salen sin escalones. Es el mismo motor, la misma receta y las
+mismas capas que el máster — y mejor que sacar el fotograma del máster con
+ffmpeg, medido: la diferencia entre ambos es exactamente el croma a la mitad
+([`MOTOR.md` §12](MOTOR.md)).
+
 ## Lo único que sigue pendiente
 
 ▢ **Windows, recompilar y ver.** Todo lo de arriba está hecho y visto en el
