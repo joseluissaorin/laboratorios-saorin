@@ -181,6 +181,38 @@ mismas capas que el máster — y mejor que sacar el fotograma del máster con
 ffmpeg, medido: la diferencia entre ambos es exactamente el croma a la mitad
 ([`MOTOR.md` §12](MOTOR.md)).
 
+## §10 · EL PIE — subtítulos automáticos (3-ago-2026)
+
+✅ **Subtítulos automáticos con modelo local**, en casa y sin red: whisper.cpp
+enlazado estático (`shell/src/oido.rs`). En el Mac por **Metal**; en Windows
+por CPU, que en el HX 370 son doce núcleos Zen 5 con AVX-512 y ggml los usa
+todos. Medido en el M4 Max con `large-v3-turbo` cuantizado: **21,5× tiempo
+real**. El modelo (574 MB) se baja UNA vez a `<taller>/modelos/`.
+
+Se escucha **la bobina entera** con una sola carga del modelo: se le manda la
+lista de planos con sonido —fichero, trozo, dónde cae y a qué velocidad— y los
+tiempos vuelven ya en segundos de la línea de tiempo.
+
+✅ **Pista propia** (`subtitulo.rs`), debajo de la tira: bloques con su texto,
+que se eligen, se mueven, se estiran por los bordes (con imán), se parten por
+la aguja y se quitan. Se corrige escribiendo encima: clic en el texto de la
+ficha, ⏎ guarda. Entra en el historial: ⌘Z deshace también el pie.
+
+✅ **El estilo, de toda la pista**: letra (Fraunces serif · Space Grotesk ·
+Grotesk negra), tinta (hueso · ámbar · blanco · tinta), cuerpo, altura,
+sombra, caja, MAYÚSCULAS y caracteres por línea. El de casa es **clásico y
+moderno a la vez**: Fraunces —un old-style de corte contemporáneo— en hueso y
+no en blanco, centrado abajo, sin caja ni contorno duro; sólo un halo
+difuminado que lo despega del fondo. La anchura del halo se midió mirando:
+ceñida se veía preciosa sobre cielo oscuro y desaparecía sobre un parabrisas
+al sol.
+
+Para el revelado un subtítulo **es una capa**: cada línea se rasteriza a un
+PNG con su alfa y entra por el camino ya probado de CAPAS §4 — así la preview
+y los dos motores lo dibujan sin saber qué es un subtítulo, y salen idénticos.
+El PNG va recortado al texto (un lienzo entero por línea serían 8 MB de
+textura cada uno).
+
 ## Lo único que sigue pendiente
 
 ▢ **Windows, recompilar y ver.** Todo lo de arriba está hecho y visto en el

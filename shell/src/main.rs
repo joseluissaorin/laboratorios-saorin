@@ -6,6 +6,7 @@
 
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod oido;
 mod server;
 
 /// El plan de bobina, incluido por ruta desde `core`: la matriz del encuadre

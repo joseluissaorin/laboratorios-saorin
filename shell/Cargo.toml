@@ -8,6 +8,13 @@ description = "LABORATORIOS SAORÍN — estudio de vídeo con revelado fílmico"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# EL OÍDO: whisper.cpp enlazado estático. En el Mac por Metal; en Windows por
+# CPU (el HX 370 es Zen 5 con AVX-512 y doce núcleos, y ggml los usa).
+whisper-rs = { version = "0.16", default-features = false }
+
+# Metal SOLO en el Mac: en Windows ni existe, y pedirlo allí no compila
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 tauri = { version = "2", features = [] }
 tiny_http = "0.12"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }

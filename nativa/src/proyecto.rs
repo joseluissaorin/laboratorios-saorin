@@ -205,6 +205,12 @@ pub struct Proyecto {
     pub capas: Vec<Capa>,
     /// las bobinas hijas de los clips anidados, cargadas al abrir
     pub subbobinas: std::collections::HashMap<String, SubBobina>,
+    /// EL PIE: la pista de subtítulos y el estilo de toda ella
+    pub subs: Vec<crate::subtitulo::Sub>,
+    pub estilo_sub: crate::subtitulo::Estilo,
+    /// los subtítulos YA VUELTOS CAPAS (rasterizados): la caché que leen la
+    /// preview y el payload. Se rehace al tocar el texto o el estilo.
+    pub pie: Vec<Capa>,
     /// las palancas del margen: silenciar el sonido del vídeo / la música
     pub mudo_voz: bool,
     pub mudo_musica: bool,
@@ -1046,6 +1052,53 @@ impl Proyecto {
     /// LOS PUNTOS A LOS QUE SE PEGA EL IMÁN: el principio y el final de cada
     /// plano, y cada marca. Es lo que hace que cortar o colocar música «con
     /// la imagen» sea un gesto y no una puntería.
+    /// LOS SUBTÍTULOS, VUELTOS CAPAS (subtitulo.rs): cada línea visible se
+    /// rasteriza a un PNG con su alfa y se coloca como una capa RGBA en la
+    /// pista de más arriba. Es lo que hace que el pie salga en el máster y en
+    /// la preview sin que ninguno de los dos sepa qué es un subtítulo — y lo
+    /// que garantiza que se vean IGUAL (la regla de la casa).
+    ///
+    /// El PNG va recortado al texto, así que hay que colocarlo: `escala`
+    /// deshace el conform (que lo estiraría al lienzo) y `pos` lo baja a su
+    /// margen. Sin esto un pie de dos palabras saldría del tamaño del plano.
+    pub fn capas_de_subs(&self, pw: u32, ph: u32) -> Vec<Capa> {
+        if self.subs.is_empty() { return Vec::new(); }
+        let (pwf, phf) = (pw.max(2) as f32, ph.max(2) as f32);
+        self.subs.iter().filter_map(|s| {
+            if s.texto.trim().is_empty() { return None; }
+            let (ruta, iw, ih) = crate::subtitulo::rasteriza(
+                &self.base, &self.estilo_sub, &s.texto, pw, ph)?;
+            let (iwf, ihf) = (iw as f32, ih as f32);
+            // el conform «Dentro» encaja la imagen en el lienzo; para que el
+            // pie salga a su tamaño de verdad hay que deshacerlo
+            let k = (pwf / iwf).min(phf / ihf);
+            let mut enc = Encuadre::limpio(0);
+            enc.escala = (1.0 / k, 1.0 / k);
+            // el borde de abajo del PNG se apoya en el margen pedido
+            let centro_y = 1.0 - self.estilo_sub.margen - (ihf / phf) * 0.5;
+            enc.pos = (0.0, centro_y - 0.5);
+            let c = Clip {
+                // LA RUTA ENTERA como «media»: el PNG del pie vive en .subs/,
+                // no en media/, y el revelado resuelve por nombre
+                media: ruta.to_string_lossy().to_string(),
+                ruta, t_in: 0.0, t_out: s.dur(), hueco: false, fade: 0.0,
+                speed: 1.0, enc, cuartos_fichero: 0,
+                prefs: self.prefs.clone(), lut_in: None, lut_color: None,
+                mute: true, desfase: 0.0, washi: None, nota: String::new(),
+                grupo: None, ausente: false, anidada: None,
+            };
+            Some(Capa {
+                c,
+                start: s.t0,
+                pista: (PISTAS_CAPA - 1) as u8,
+                // una entrada y una salida cortas: un pie que aparece de
+                // golpe se nota, y uno que se funde despacio se lee mal
+                fundido_in: 0.08,
+                fundido_out: 0.08,
+            })
+        }).collect()
+    }
+
     pub fn imanes(&self) -> Vec<f64> {
         let mut v: Vec<f64> = vec![0.0];
         let mut acc = 0.0;
@@ -1128,6 +1181,11 @@ impl Proyecto {
                     .collect::<Vec<_>>() })
         }).collect();
         v["audio"] = serde_json::json!(audio);
+        // EL PIE: los subtítulos y su estilo (subtitulo.rs)
+        v["subs"] = serde_json::json!(self.subs.iter().map(|x| {
+            serde_json::json!({"t0": x.t0, "t1": x.t1, "texto": x.texto})
+        }).collect::<Vec<_>>());
+        v["estilo_sub"] = self.estilo_sub.json();
         v["markers"] = serde_json::json!(self.marcas.iter().map(|m| {
             serde_json::json!({"t": m.t, "nota": m.nota, "color": m.color})
         }).collect::<Vec<_>>());
@@ -1250,6 +1308,17 @@ impl Proyecto {
                 })
             }).collect();
         marcas.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+        let mut subs: Vec<crate::subtitulo::Sub> = v["subs"].as_array().cloned()
+            .unwrap_or_default().iter().filter_map(|x| {
+                let t0 = x["t0"].as_f64()?;
+                Some(crate::subtitulo::Sub {
+                    t0,
+                    t1: x["t1"].as_f64().unwrap_or(t0 + 1.5).max(t0 + 0.05),
+                    texto: x["texto"].as_str().unwrap_or("").to_string(),
+                })
+            }).collect();
+        subs.sort_by(|a, b| a.t0.partial_cmp(&b.t0).unwrap_or(std::cmp::Ordering::Equal));
+        let estilo_sub = crate::subtitulo::Estilo::de_json(&v["estilo_sub"]);
         let rango = match (v["range"]["in"].as_f64(), v["range"]["out"].as_f64()) {
             (Some(a), Some(b)) if b > a + 0.01 => Some((a, b)),
             _ => None,
@@ -1281,6 +1350,9 @@ impl Proyecto {
             audio,
             capas,
             subbobinas,
+            subs,
+            estilo_sub,
+            pie: Vec::new(),
             mudo_voz: v["mudo"]["voz"].as_bool().unwrap_or(false),
             mudo_musica: v["mudo"]["musica"].as_bool().unwrap_or(false),
             rango,
@@ -1337,21 +1409,38 @@ impl Proyecto {
 
     /// LAS CAPAS VISIBLES en el segundo `t`: hasta dos, de abajo arriba, con
     /// su tiempo de fuente y su alfa (CAPAS §3)
+    /// LA LISTA DE CAPAS, con el pie detrás: los índices que pasan de
+    /// `capas.len()` son subtítulos. Así la preview y el revelado tratan un
+    /// subtítulo como lo que es para ellos —una capa RGBA— sin saberlo.
+    pub fn capa_num(&self, k: usize) -> Option<&Capa> {
+        if k < self.capas.len() { self.capas.get(k) }
+        else { self.pie.get(k - self.capas.len()) }
+    }
+
+    pub fn cuantas_capas(&self) -> usize { self.capas.len() + self.pie.len() }
+
+    /// REHACER EL PIE: rasteriza los subtítulos al lienzo pedido. Se llama al
+    /// cambiar el texto, el estilo o el formato de la bobina — no en cada
+    /// fotograma (rasterizar es barato, pero no gratis).
+    pub fn refresca_pie(&mut self, pw: u32, ph: u32) {
+        self.pie = self.capas_de_subs(pw, ph);
+    }
+
     pub fn capas_en(&self, t: f64) -> Vec<(usize, f64, f32)> {
         // EL APILADO ES POR PISTA (V2 < V3 < …), como en cualquier editor:
         // a igual pista, la última colocada gana. TODAS las visibles: el
         // renglón tiene un hueco por pista, ninguna se cae.
-        let mut idx: Vec<usize> = (0..self.capas.len())
+        let mut idx: Vec<usize> = (0..self.cuantas_capas())
             .filter(|&k| {
-                let cp = &self.capas[k];
+                let Some(cp) = self.capa_num(k) else { return false };
                 t >= cp.start - 1e-9 && t < cp.fin() - 1e-9
             })
             .collect();
-        idx.sort_by_key(|&k| (self.capas[k].pista, k));
+        idx.sort_by_key(|&k| (self.capa_num(k).map(|c| c.pista).unwrap_or(0), k));
         idx.into_iter()
-            .map(|k| {
-                let cp = &self.capas[k];
-                (k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t))
+            .filter_map(|k| {
+                let cp = self.capa_num(k)?;
+                Some((k, cp.c.fuente_en(t - cp.start), cp.alfa_en(t)))
             })
             .collect()
     }

@@ -449,6 +449,14 @@ impl Visor {
     /// los ajustes del otro: la preview mentía sobre lo que enseñaba.
     pub fn marca_cuarto(&mut self, i: usize) { self.cuarto_pendiente = Some(i); }
 
+    /// OLVIDAR LAS CAPAS RESIDENTES: al cambiar un subtítulo o su estilo, el
+    /// PNG es otro fichero y el de antes sobra. Sin esto la preview seguiría
+    /// enseñando el texto viejo hasta reiniciar.
+    pub fn olvida_capas(&mut self) {
+        self.capa_rgba.clear();
+        self.receta_puesta = None;
+    }
+
     /// EMPIEZA UN PLANO: el arrastre del obturador no cruza el empalme, igual
     /// que en el máster (lo que ves es lo que sale)
     fn marca_corte(&mut self, i: usize) {
@@ -938,13 +946,13 @@ impl Visor {
         // Fotos y rótulos van residentes en RGBA; una capa de vídeo se
         // decodifica síncrona (el mismo camino del scrub) y sube como RGBA
         // convertida — la preview dice la verdad también con capas.
-        if !pr.capas.is_empty() {
+        if pr.cuantas_capas() > 0 {
             // la gelatina identidad tiene que existir antes de atar el grupo
             self.carga_lut(g, "");
         }
         for (hueco, (k, t_f, alfa)) in pr.capas_en(self.t).into_iter().enumerate() {
             if alfa <= 0.001 { continue }
-            let Some(cp) = pr.capas.get(k) else { continue };
+            let Some(cp) = pr.capa_num(k) else { continue };
             let vista = if crate::foto::es_foto(&cp.c.ruta) {
                 if !self.capa_rgba.contains_key(&cp.c.ruta) {
                     if let Ok((fw, fh, datos)) = filmlook_core::foto::rgba(&cp.c.ruta) {

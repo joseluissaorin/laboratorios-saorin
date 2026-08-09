@@ -23,7 +23,7 @@ pub enum Accion {
     Mesa, CuartoOscuro, Revelado, PantallaCompleta, Lupa, Iman,
     Chuleta, Ajustes, Acerca,
     /// lo que faltaba en la barra y solo vivía en una tecla
-    Encuadre, Congelar, Desacopla, InsertaBobina, MarcaAqui, MarcasCompas, RangoEntrada, RangoSalida, RangoQuitar, Bucle,
+    Encuadre, Congelar, Desacopla, InsertaBobina, MarcaAqui, MarcasCompas, Subtitular, PieFuera, RangoEntrada, RangoSalida, RangoQuitar, Bucle,
     VentanaAjustes, VentanaChuleta, VentanaVigia, VentanaBobinas,
 }
 
@@ -73,6 +73,9 @@ pub const MENUS: &[Persiana] = &[
         e("Desacoplar el sonido", "⇧D", Accion::Desacopla),
         e("Marca en la aguja",    "M",  Accion::MarcaAqui),
         e("Marcas al compás de la música", "", Accion::MarcasCompas),
+        SEP,
+        e("Subtítulos automáticos", "",  Accion::Subtitular),
+        e("Quitar los subtítulos",  "",  Accion::PieFuera),
     ]},
     Persiana { titulo: "Rango", entradas: &[
         e("Entrada aquí",         "⇧I", Accion::RangoEntrada),

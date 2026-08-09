@@ -31,6 +31,7 @@ mod miniaturas;
 mod ondas;
 mod proyecto;
 mod ritmo;
+mod subtitulo;
 mod sonido;
 mod trazo;
 mod ui;
@@ -314,6 +315,8 @@ struct Estado {
     compases: std::collections::HashMap<String, ritmo::Compas>,
     /// cuánto ha crecido el banco por las pistas de capa visibles (px)
     extra_capas: f32,
+    /// … y por el carril del pie (0 si la bobina no lleva subtítulos)
+    extra_sub: f32,
     /// carriles de música visibles (los usados más uno libre; mínimo 3)
     musica_vis: usize,
     raton: (f32, f32),
@@ -373,6 +376,11 @@ struct Estado {
     encuadre_copiado: Option<proyecto::Encuadre>,
     /// escribiendo la nota de una marca: (índice, texto)
     marcando: Option<(usize, String)>,
+    /// EL PIE: qué subtítulo está elegido y, si se está escribiendo, su texto
+    sel_sub: Option<usize>,
+    escribiendo_sub: Option<(usize, String)>,
+    /// el oído en marcha (el shell transcribiendo) y adónde deja el .srt
+    oyendo: Option<(std::process::Child, std::path::PathBuf)>,
     /// escribiendo un número a mano: (clip, campo, texto)
     tecleando: Option<(usize, u8, String)>,
     /// el rótulo que se está reescribiendo (§5): a qué clip sustituir
@@ -443,6 +451,7 @@ struct Paso {
     audio: Vec<proyecto::ClipAudio>,
     capas: Vec<proyecto::Capa>,
     marcas: Vec<proyecto::Marca>,
+    subs: Vec<subtitulo::Sub>,
     que: String,
 }
 
@@ -470,6 +479,8 @@ enum Arrastre {
     CapaTrimD(usize),
     /// colocar el PiP: alt-arrastre en el visor con una capa elegida
     CapaEncuadre(usize),
+    /// EL PIE: mover el subtítulo y estirarlo por los bordes
+    SubMueve(usize), SubTrimI(usize), SubTrimD(usize),
     Manivela, Barra, Caja,
 }
 
@@ -776,6 +787,7 @@ impl ApplicationHandler for App {
             banco_h: 250.0,
             compases: std::collections::HashMap::new(),
             extra_capas: 0.0,
+            extra_sub: 0.0,
             musica_vis: 3,
             raton: (0.0, 0.0),
             arrastrando: Arrastre::Nada,
@@ -804,6 +816,9 @@ impl ApplicationHandler for App {
             enc_gesto: None,
             encuadre_copiado: None,
             marcando: None,
+            sel_sub: None,
+            escribiendo_sub: None,
+            oyendo: None,
             tecleando: None,
             retitulando: None,
             bobina_menu: None,
@@ -1166,6 +1181,41 @@ impl ApplicationHandler for App {
                                 // 24 px de pista ≈ 30 dB de recorrido
                                 p.1 = (p.1 - dy as f64 * 30.0 / 24.0).clamp(-24.0, 6.0);
                             }
+                        }
+                    }
+                    // ── EL PIE: mover y estirar ────────────────────────
+                    Arrastre::SubMueve(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        let radio = 10.0 / e.pxs as f64;
+                        let iman = prefs::IMAN.load(std::sync::atomic::Ordering::Relaxed);
+                        let puntos = if iman { self.proyecto.imanes() } else { Vec::new() };
+                        if let Some(sb) = self.proyecto.subs.get_mut(i) {
+                            let dur = sb.t1 - sb.t0;
+                            let mut nuevo = (sb.t0 + d).max(0.0);
+                            if iman {
+                                // los dos bordes, como en la música
+                                let mut cand: Vec<f64> = Vec::with_capacity(puntos.len() * 2);
+                                for x in &puntos { cand.push(*x); cand.push(x - dur); }
+                                cand.retain(|c| *c >= -0.001 && (c - nuevo).abs() <= radio);
+                                if let Some(x) = cand.into_iter().min_by(|p, q| {
+                                    (p - nuevo).abs().partial_cmp(&(q - nuevo).abs())
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                }) { nuevo = x.max(0.0); }
+                            }
+                            sb.t0 = nuevo;
+                            sb.t1 = nuevo + dur;
+                        }
+                    }
+                    Arrastre::SubTrimI(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        if let Some(sb) = self.proyecto.subs.get_mut(i) {
+                            sb.t0 = (sb.t0 + d).clamp(0.0, sb.t1 - 0.15);
+                        }
+                    }
+                    Arrastre::SubTrimD(i) => {
+                        let d = (dx / e.pxs) as f64;
+                        if let Some(sb) = self.proyecto.subs.get_mut(i) {
+                            sb.t1 = (sb.t1 + d).max(sb.t0 + 0.15);
                         }
                     }
                     Arrastre::CapaMueve(i) => {
@@ -1803,6 +1853,43 @@ impl ApplicationHandler for App {
                                         || ch == '-') && t.chars().count() < 12 {
                                         t.push(ch);
                                     }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                // ── CORREGIR UN SUBTÍTULO ────────────────────────────────
+                // Lo primero que se hace con un subtítulo automático es
+                // arreglarlo: se escribe encima, en su sitio, sin diálogos.
+                if e.escribiendo_sub.is_some() {
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::Escape) => { e.escribiendo_sub = None; }
+                        PhysicalKey::Code(KeyCode::Enter) => {
+                            if let Some((k, txt)) = e.escribiendo_sub.take() {
+                                let t = txt.trim().to_string();
+                                if let Some(sb) = self.proyecto.subs.get_mut(k) {
+                                    if sb.texto != t {
+                                        e.recuerda(&self.proyecto);
+                                        self.proyecto.subs[k].texto = t;
+                                        let _ = self.proyecto.guarda();
+                                        let (pw2, ph2) = e.lienzo_del_master(&self.proyecto);
+                                        self.proyecto.refresca_pie(pw2 as u32, ph2 as u32);
+                                        e.visor.olvida_capas();
+                                        e.visor.busca(&self.proyecto, e.visor.t);
+                                    }
+                                }
+                                e.di("subtítulo corregido");
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::Backspace) => {
+                            if let Some((_, t)) = e.escribiendo_sub.as_mut() { t.pop(); }
+                        }
+                        _ => {
+                            if let (Some((_, t)), Some(txt)) =
+                                (e.escribiendo_sub.as_mut(), event.text.as_ref()) {
+                                for ch in txt.chars() {
+                                    if !ch.is_control() && t.chars().count() < 200 { t.push(ch); }
                                 }
                             }
                         }
@@ -2582,6 +2669,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // ¿ha terminado el oído? Va aquí porque instalar los
+                // subtítulos toca la bobina, y el dibujo la ve prestada
+                e.atiende_al_oido(&mut self.proyecto);
+                // ¿el pie rasterizado va con los subtítulos? Al abrir la
+                // bobina y al deshacer no, y hay que rehacerlo (rasterizar
+                // está cacheado en disco: si no cambió nada, no cuesta)
+                let vivos = self.proyecto.subs.iter()
+                    .filter(|s| !s.texto.trim().is_empty()).count();
+                if self.proyecto.pie.len() != vivos {
+                    e.refresca_pie(&mut self.proyecto);
+                }
                 e.frame(&self.proyecto);
             }
             _ => {}
@@ -2911,7 +3009,7 @@ impl Estado {
     fn recuerda(&mut self, pr: &Proyecto) {
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
                                   capas: pr.capas.clone(), marcas: pr.marcas.clone(),
-                                  que: String::new() });
+                                  subs: pr.subs.clone(), que: String::new() });
         if self.historia.len() > 80 { self.historia.remove(0); }
         self.futuro.clear();
         self.espera_rotulo = true;
@@ -2930,7 +3028,7 @@ impl Estado {
             if !Self::bobinas_iguales(&prev, pr) {
                 self.historia.push(Paso { clips: prev.0, audio: prev.1,
                                           capas: prev.2, marcas: prev.3,
-                                          que: String::new() });
+                                          subs: pr.subs.clone(), que: String::new() });
                 if self.historia.len() > 80 { self.historia.remove(0); }
                 self.futuro.clear();
                 self.espera_rotulo = true;
@@ -3007,6 +3105,19 @@ impl Estado {
             A::Desacopla => self.desacopla(pr),
             A::InsertaBobina => self.inserta_bobina(pr),
             A::MarcasCompas => self.marcas_al_compas(pr),
+            A::Subtitular => self.pon_el_oido(pr),
+            A::PieFuera => {
+                if pr.subs.is_empty() { self.di("no hay subtítulos que quitar"); }
+                else {
+                    self.recuerda(pr);
+                    let n = pr.subs.len();
+                    pr.subs.clear();
+                    self.sel_sub = None;
+                    let _ = pr.guarda();
+                    self.refresca_pie(pr);
+                    self.di(&format!("fuera {n} subtítulo(s)"));
+                }
+            }
             A::MarcaAqui => {
                 let t = pr.fps.max(1.0);
                 let t = (self.visor.t * t).round() / t;
@@ -3410,11 +3521,12 @@ impl Estado {
                      else { prev.que.clone() };
         self.futuro.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
                                 capas: pr.capas.clone(), marcas: pr.marcas.clone(),
-                                que: prev.que });
+                                subs: pr.subs.clone(), que: prev.que });
         pr.clips = prev.clips;
         pr.audio = prev.audio;
         pr.capas = prev.capas;
         pr.marcas = prev.marcas;
+        pr.subs = prev.subs;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -3428,11 +3540,12 @@ impl Estado {
                      else { sig.que.clone() };
         self.historia.push(Paso { clips: pr.clips.clone(), audio: pr.audio.clone(),
                                   capas: pr.capas.clone(), marcas: pr.marcas.clone(),
-                                  que: sig.que });
+                                  subs: pr.subs.clone(), que: sig.que });
         pr.clips = sig.clips;
         pr.audio = sig.audio;
         pr.capas = sig.capas;
         pr.marcas = sig.marcas;
+        pr.subs = sig.subs;
         let _ = pr.guarda();
         self.sel = None;
         self.espera_rotulo = false;
@@ -3470,10 +3583,12 @@ impl Estado {
         use winit::window::CursorIcon as CI;
         let cur = match self.arrastrando {
             Arrastre::ClipMueve(_) | Arrastre::MusicaMueve(_)
-                | Arrastre::CapaMueve(_) | Arrastre::CapaEncuadre(_) => CI::Grabbing,
+                | Arrastre::CapaMueve(_) | Arrastre::CapaEncuadre(_)
+                | Arrastre::SubMueve(_) => CI::Grabbing,
             _ if self.cubo_pinza.is_some() => CI::Grabbing,
             Arrastre::MusicaTrimI(_) | Arrastre::MusicaTrimD(_)
-                | Arrastre::CapaTrimI(_) | Arrastre::CapaTrimD(_) => CI::ColResize,
+                | Arrastre::CapaTrimI(_) | Arrastre::CapaTrimD(_)
+                | Arrastre::SubTrimI(_) | Arrastre::SubTrimD(_) => CI::ColResize,
             Arrastre::MusicaPunto(_, _) | Arrastre::MusicaGain(_) => CI::NsResize,
             Arrastre::Encuadre(_) => CI::Move,
             Arrastre::EncTirador(_, k) => match k {
@@ -6405,11 +6520,33 @@ impl Estado {
 
     /// y de la cabecera del carril `k`
     fn pista_y(&self, k: u8) -> f32 {
-        self.tira_y() + 88.0 + 14.0 + k as f32 * Self::ALTO_PISTA
+        self.tira_y() + 88.0 + 14.0 + self.extra_sub + k as f32 * Self::ALTO_PISTA
     }
 
     /// EL ALTO de cada pista de capa en pantalla
     const ALTO_CAPA: f32 = 24.0;
+
+    /// EL CARRIL DEL PIE: alto en pantalla, y cuánto baja a la música
+    const ALTO_SUB: f32 = 22.0;
+
+    /// ¿se ve el carril de subtítulos? Sólo si hay pie (o se está haciendo):
+    /// quien no subtitula no pierde mesa por ello.
+    fn hay_pie(&self, pr: &Proyecto) -> bool { !pr.subs.is_empty() }
+
+    /// la Y del carril del pie: pegado DEBAJO de la tira de vídeo, que es
+    /// donde va un subtítulo — entre la imagen y el sonido
+    fn sub_y(&self) -> f32 { self.tira_y() + 88.0 + 3.0 }
+
+    /// el subtítulo bajo el ratón, si lo hay
+    fn sub_en_punto(&self, pr: &Proyecto, mx: f32, my: f32) -> Option<usize> {
+        if !self.hay_pie(pr) { return None; }
+        let y = self.sub_y();
+        if my < y - 2.0 || my > y + Self::ALTO_SUB { return None; }
+        (0..pr.subs.len()).find(|&k| {
+            let (x0, x1) = (self.x_de(pr.subs[k].t0), self.x_de(pr.subs[k].t1));
+            mx >= x0 - 1.0 && mx <= x1 + 1.0
+        })
+    }
 
     /// CUÁNTAS PISTAS DE CAPA SE VEN: las que tienen material más una libre
     /// para soltar encima — el gesto de DaVinci de «la pista aparece cuando
@@ -6773,6 +6910,120 @@ impl Estado {
         format!("{base}{tramo}_{anio:04}{mes:02}{dia:02}-{hh:02}{mm:02}")
     }
 
+    /// EL OÍDO: subtítulos automáticos de TODA la bobina, con un modelo que
+    /// corre en esta máquina y sin que salga nada a ninguna red.
+    ///
+    /// Se manda la lista de planos con sonido —fichero, trozo, dónde cae y a
+    /// qué velocidad— y el shell carga el modelo UNA vez para todos. Los
+    /// tiempos vuelven ya en segundos de la bobina.
+    fn pon_el_oido(&mut self, pr: &mut Proyecto) {
+        if self.oyendo.is_some() { self.di("el oído ya está escuchando"); return; }
+        if self.revelando.is_some() { self.di("espera a que acabe el revelado"); return; }
+        let inicios = pr.inicios();
+        let trabajos: Vec<serde_json::Value> = pr.clips.iter().enumerate()
+            .filter(|(_, c)| !c.hueco && !c.mute && !c.ausente && c.anidada.is_none())
+            .map(|(i, c)| serde_json::json!({
+                "file": c.media,
+                "in": c.t_in, "out": c.t_out,
+                "desde": inicios.get(i).copied().unwrap_or(0.0),
+                "speed": c.speed,
+            })).collect();
+        if trabajos.is_empty() {
+            self.di("no hay ningún plano con sonido que escuchar");
+            return;
+        }
+        let lista = std::env::temp_dir().join("saorin_oido.json");
+        if std::fs::write(&lista, serde_json::json!(trabajos).to_string()).is_err() {
+            self.di("no pude preparar el trabajo del oído"); return;
+        }
+        let srt = std::env::temp_dir().join("saorin_pie.srt");
+        let _ = std::fs::remove_file(&srt);
+        let nom = if cfg!(windows) { "laboratorios-saorin.exe" } else { "laboratorios-saorin" };
+        let bin = std::env::current_exe().ok()
+            .and_then(|p| p.parent().map(|d| d.join(nom)))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent().unwrap().join("shell/target/release").join(nom));
+        match std::process::Command::new(&bin)
+            .args(["cli", "oye", "--trabajos", lista.to_str().unwrap_or(""),
+                   "--idioma", "es", "--modelo", "1",
+                   "--out", srt.to_str().unwrap_or("")])
+            .env("FL_MEDIA", pr.base.join("media"))
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(mut c) => {
+                *self.progreso.lock().unwrap() = (0.0, "el oído".into());
+                if let Some(err) = c.stderr.take() {
+                    let prog = self.progreso.clone();
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        for linea in std::io::BufReader::new(err).lines().flatten() {
+                            // el diario del shell viene con «⟨ 1.2s⟩ » delante
+                            let l = linea.rsplit('⟩').next().unwrap_or(&linea).trim().to_string();
+                            if !l.is_empty() && !l.starts_with('%') {
+                                let mut p = prog.lock().unwrap();
+                                p.1 = l.chars().take(60).collect();
+                            }
+                        }
+                    });
+                }
+                self.oyendo = Some((c, srt));
+                self.di("el oído: escuchando la bobina…");
+            }
+            Err(_) => self.di("no encuentro el oído (falta el binario del taller)"),
+        }
+    }
+
+    /// ¿ha terminado el oído? Si sí, el .srt entra en la pista del pie.
+    fn atiende_al_oido(&mut self, pr: &mut Proyecto) {
+        let Some((hijo, srt)) = self.oyendo.as_mut() else { return };
+        let Ok(Some(st)) = hijo.try_wait() else { return };
+        let srt = srt.clone();
+        self.oyendo = None;
+        if !st.success() {
+            let (_, motivo) = self.progreso.lock().map(|p| p.clone())
+                .unwrap_or((0.0, String::new()));
+            self.di(&format!("el oído falló: {motivo}"));
+            return;
+        }
+        let Ok(texto) = std::fs::read_to_string(&srt) else {
+            self.di("el oído no dejó nada escrito"); return;
+        };
+        let nuevos = subtitulo::de_srt(&texto);
+        if nuevos.is_empty() { self.di("no se oyó nada que subtitular"); return; }
+        self.recuerda(pr);
+        pr.subs = nuevos;
+        let _ = pr.guarda();
+        self.refresca_pie(pr);
+        self.visor.foley(sonido::Foley::Lata);
+        self.di(&format!("{} subtítulo(s) — clic para corregirlos", pr.subs.len()));
+        Self::avisa_al_sistema("Subtítulos listos",
+                               &format!("{} líneas en la pista del pie", pr.subs.len()));
+    }
+
+    /// LA REJILLA DE MANDOS DEL PIE, en un solo sitio: la lección de la sala
+    /// de revelado (si el dibujo y el ratón llevan sus números aparte, se
+    /// separan solos en cuanto una ficha crece).
+    fn pie_estilo_y(&self, pr: &Proyecto, is: usize) -> f32 {
+        let vivo = self.escribiendo_sub.as_ref().filter(|(k, _)| *k == is)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| pr.subs.get(is).map(|s| s.texto.clone()).unwrap_or_default());
+        let n = subtitulo::parte(&vivo, pr.estilo_sub.ancho_linea as usize).len().max(1);
+        // el mismo recorrido que el dibujo: cabecera, texto, cinco filas
+        Self::CABECERA + 8.0 + 20.0 + 20.0 + 17.0 * n as f32 + 15.0 * 4.0 + 22.0 + 16.0
+    }
+
+    /// REHACER EL PIE tras tocar el texto o el estilo: rasteriza al lienzo
+    /// del máster (para que la preview enseñe exactamente lo que va a salir)
+    /// y le dice a la preview que se olvide de lo que tenía.
+    fn refresca_pie(&mut self, pr: &mut Proyecto) {
+        let (pw, ph) = self.lienzo_del_master(pr);
+        pr.refresca_pie(pw as u32, ph as u32);
+        self.visor.olvida_capas();
+        self.visor.busca(pr, self.visor.t);
+    }
+
     /// SACAR LA COPIA (la ampliadora del cuarto oscuro): el fotograma que se
     /// está mirando, revelado por el MISMO motor que la bobina —misma receta,
     /// mismas capas, mismo encuadre, mismo grano— y escrito como imagen. No
@@ -6925,10 +7176,12 @@ impl Estado {
             "prefs": pr.clips.first().map(|c| c.prefs.clone()).unwrap_or(pr.prefs.clone()),
         });
         // ── LAS CAPAS (CAPAS §3): el carril de encima, recortado al rango ──
-        let mut orden_capas: Vec<usize> = (0..pr.capas.len()).collect();
-        orden_capas.sort_by_key(|&k| (pr.capas[k].pista, k));
+        // EL PIE VIAJA CON LAS CAPAS: para el motor un subtítulo es una capa
+        // RGBA más (subtitulo.rs), así que aquí no hay caso especial ninguno
+        let mut orden_capas: Vec<usize> = (0..pr.cuantas_capas()).collect();
+        orden_capas.sort_by_key(|&k| (pr.capa_num(k).map(|c| c.pista).unwrap_or(0), k));
         let capas_payload: Vec<serde_json::Value> = orden_capas.into_iter()
-            .map(|k| &pr.capas[k]).filter_map(|cp| {
+            .filter_map(|k| pr.capa_num(k)).filter_map(|cp| {
             let (ini, fin) = (cp.start, cp.fin());
             if solo_tramo && (fin <= ra + 1e-6 || ini >= rb - 1e-6) { return None; }
             let (mut c_in, mut c_out, mut st) = (cp.c.t_in, cp.c.t_out, ini);
@@ -7323,6 +7576,81 @@ impl Estado {
         let (ancho, alto) = self.gpu.alto_ancho();
         let (mx, my) = self.raton;
         let banco = self.banco_y();
+        // ── LA FICHA DEL PIE manda si hay un subtítulo elegido ───────────
+        if let Some(is) = self.sel_sub {
+            let fx = ancho - Self::INSPECTOR_W + 10.0;
+            if mx > fx - 6.0 && is < pr.subs.len() {
+                // el texto: clic encima = escribirlo
+                let alto_txt = 14.0 + 17.0 * subtitulo::parte(&pr.subs[is].texto,
+                    pr.estilo_sub.ancho_linea as usize).len().max(1) as f32;
+                let y_txt = Self::CABECERA + 26.0;
+                if my >= y_txt - 2.0 && my <= y_txt + alto_txt {
+                    self.escribiendo_sub = Some((is, pr.subs[is].texto.clone()));
+                    self.di("escribe el subtítulo · ⏎ para guardarlo");
+                    return;
+                }
+                // LOS MANDOS DEL ESTILO: la misma rejilla que los dibuja
+                let ey = self.pie_estilo_y(pr, is);
+                let col = if mx >= fx + 4.0 && mx <= fx + 78.0 { Some(0) }
+                          else if mx >= fx + 84.0 && mx <= fx + 158.0 { Some(1) }
+                          else { None };
+                let fila = if my >= ey && my <= ey + 116.0 {
+                    Some(((my - ey) / 24.0).floor() as usize) } else { None };
+                if let (Some(c), Some(f)) = (col, fila) {
+                    let atras = self.mods.shift_key();
+                    let paso = |v: f32, d: f32, lo: f32, hi: f32, atras: bool| -> f32 {
+                        let n = if atras { v - d } else { v + d };
+                        if n > hi + 1e-4 { lo } else if n < lo - 1e-4 { hi } else { n }
+                    };
+                    self.recuerda(pr);
+                    let e = &mut pr.estilo_sub;
+                    let mut quitar = false;
+                    let mut partir = false;
+                    match (f, c) {
+                        (0, 0) => e.familia = (e.familia + 1) % 3,
+                        (0, 1) => e.tinta = (e.tinta + 1) % 4,
+                        (1, 0) => e.cuerpo = paso(e.cuerpo, 0.004, 0.026, 0.075, atras),
+                        (1, 1) => e.margen = paso(e.margen, 0.015, 0.03, 0.30, atras),
+                        (2, 0) => e.sombra = paso(e.sombra, 0.25, 0.0, 1.0, atras),
+                        (2, 1) => e.caja = if e.caja > 0.01 { 0.0 } else { 0.55 },
+                        (3, 0) => e.mayusculas = !e.mayusculas,
+                        (3, 1) => e.ancho_linea = if e.ancho_linea >= 46 { 28 }
+                                                  else { e.ancho_linea + 6 },
+                        (4, 0) => partir = true,
+                        (4, 1) => quitar = true,
+                        _ => {}
+                    }
+                    if quitar {
+                        let q = pr.subs.remove(is);
+                        self.sel_sub = None;
+                        self.di(&format!("fuera «{}»",
+                                         q.texto.chars().take(20).collect::<String>()));
+                    } else if partir {
+                        // PARTIR EN DOS por la aguja: el gesto de siempre para
+                        // un subtítulo que se ha comido dos frases
+                        let t = self.visor.t;
+                        let sb = pr.subs[is].clone();
+                        if t > sb.t0 + 0.2 && t < sb.t1 - 0.2 {
+                            let trozos = subtitulo::parte(&sb.texto,
+                                (sb.texto.chars().count() / 2).max(4));
+                            let (a, b) = (trozos.first().cloned().unwrap_or_default(),
+                                          trozos.get(1..).map(|x| x.join(" ")).unwrap_or_default());
+                            pr.subs[is] = subtitulo::Sub { t0: sb.t0, t1: t, texto: a };
+                            pr.subs.insert(is + 1,
+                                subtitulo::Sub { t0: t, t1: sb.t1, texto: b });
+                            self.di("subtítulo partido por la aguja");
+                        } else {
+                            self.di("pon la aguja DENTRO del subtítulo para partirlo");
+                        }
+                    }
+                    let _ = pr.guarda();
+                    self.refresca_pie(pr);
+                    self.visor.foley(sonido::Foley::Tick);
+                    return;
+                }
+                return;
+            }
+        }
         // ── LA FICHA DE LA CAPA manda si hay una elegida (CAPAS §7) ──────
         if let Some(k) = self.sel_capa {
             let fx = ancho - Self::INSPECTOR_W + 10.0;
@@ -7706,6 +8034,34 @@ impl Estado {
                 }
                 return;
             }
+            // ── EL CARRIL DEL PIE: elegir, mover, estirar ────────────────
+            // Los tiradores viven DENTRO de su propio bloque (la lección de
+            // los bordes compartidos de la música): así dos subtítulos
+            // pegados no se roban el tirador.
+            if self.hay_pie(pr) {
+                if let Some(k) = self.sub_en_punto(pr, mx, my) {
+                    self.sel_sub = Some(k);
+                    self.sel = None; self.sel_audio = None; self.sel_capa = None;
+                    let (x0, x1) = (self.x_de(pr.subs[k].t0), self.x_de(pr.subs[k].t1));
+                    self.abre_gesto(pr);
+                    self.arrastrando = if mx - x0 < 7.0 && x1 - x0 > 18.0 {
+                        Arrastre::SubTrimI(k)
+                    } else if x1 - mx < 7.0 && x1 - x0 > 18.0 {
+                        Arrastre::SubTrimD(k)
+                    } else {
+                        Arrastre::SubMueve(k)
+                    };
+                    self.escribiendo_sub = None;
+                    return;
+                }
+                // el carril, pero fuera de todo bloque: se deselecciona
+                let sy = self.sub_y();
+                if my >= sy - 2.0 && my <= sy + Self::ALTO_SUB && mx > Self::ESTANTE_W {
+                    self.sel_sub = None;
+                    self.escribiendo_sub = None;
+                    return;
+                }
+            }
             // ── QUITAR LA CUCHILLA CON UN CLIC ────────────────────────────
             // Una vez puesta, la única salida era Esc o cortar: si no sabías
             // lo de Esc, estabas obligado a cortar. Ahora se quita clicándola
@@ -8026,7 +8382,8 @@ impl Estado {
         self.extra_capas =
             self.pistas_capa_visibles(pr).saturating_sub(1) as f32 * Self::ALTO_CAPA;
         self.musica_vis = Self::musica_visibles(pr);
-        self.banco_h = 250.0 + self.extra_capas
+        self.extra_sub = if self.hay_pie(pr) { Self::ALTO_SUB + 6.0 } else { 0.0 };
+        self.banco_h = 250.0 + self.extra_capas + self.extra_sub
             + self.musica_vis.saturating_sub(3) as f32 * Self::ALTO_PISTA;
         self.dib_frames += 1;
         let v = self.dib_desde.elapsed().as_secs_f64();
@@ -8442,7 +8799,11 @@ impl Estado {
         // van en el atlas, que se pinta SIEMPRE por encima de la capa de
         // rectángulos. Se veían las dos a la vez y no se leía ninguna. Un
         // panel, una ficha: la que hayas elegido.
-        let solo_musica = self.sel_audio.is_some() || self.sel_capa.is_some();
+        // la ficha del clip NO se dibuja si manda otra: las texturas del
+        // atlas van siempre por encima de los rectángulos y se transparenta
+        // (la lección de la ficha de la música, §1.8)
+        let solo_musica = self.sel_audio.is_some() || self.sel_capa.is_some()
+            || self.sel_sub.is_some();
         let ix = ancho - Self::INSPECTOR_W;
         if !solo_musica {
         trazo::linea(&mut d, ix + 1.0, Self::CABECERA + 8.0, ix + 1.0, banco - 10.0,
@@ -8761,6 +9122,87 @@ impl Estado {
                 d.texto(fx + 4.0, y3b + 26.0, "arrástrala para moverla · bordes: recortar",
                         8.0, paleta::TINTA_TENUE);
                 d.texto(fx + 4.0, y3b + 37.0, "alt-arrastre en el visor: colocar el PiP",
+                        8.0, paleta::TINTA_TENUE);
+            }
+        } else
+        // ── LA FICHA DEL PIE (subtitulo.rs) ─────────────────────────────
+        // El texto, sus tiempos y EL ESTILO DE TODA LA PISTA: un subtítulo
+        // no se estila suelto, se estila la película entera.
+        if let Some(is) = self.sel_sub {
+            if let Some(sb) = pr.subs.get(is) {
+                let fx = ancho - Self::INSPECTOR_W + 10.0;
+                let mut y = Self::CABECERA + 8.0;
+                let alto_ficha = (banco - 10.0 - (y - 6.0)).max(250.0);
+                trazo::linea(&mut d, fx - 10.0, Self::CABECERA + 8.0,
+                             fx - 10.0, banco - 10.0, 1.6, paleta::TINTA_TENUE, 43);
+                d.rect(fx - 6.0, y - 6.0, Self::INSPECTOR_W - 8.0, alto_ficha,
+                       [0.98, 0.97, 0.94, 1.0]);
+                trazo::caja(&mut d, fx - 6.0, y - 6.0, Self::INSPECTOR_W - 8.0, alto_ficha,
+                            1.4, paleta::TINTA, 930);
+                d.texto_f(ui::Familia::Grot, fx + 4.0, y, "EL PIE", 11.0, paleta::TINTA);
+                y += 20.0;
+                // el texto, en grande y partido como saldrá
+                let escribiendo = self.escribiendo_sub.as_ref()
+                    .filter(|(k, _)| *k == is).map(|(_, t)| t.clone());
+                let vivo = escribiendo.clone().unwrap_or_else(|| sb.texto.clone());
+                let lineas = subtitulo::parte(&vivo, pr.estilo_sub.ancho_linea as usize);
+                d.rect(fx + 2.0, y - 2.0, Self::INSPECTOR_W - 20.0,
+                       14.0 + 17.0 * lineas.len().max(1) as f32,
+                       if escribiendo.is_some() { [0.99, 0.94, 0.90, 1.0] }
+                       else { [0.96, 0.95, 0.92, 1.0] });
+                for (li, l) in lineas.iter().enumerate() {
+                    let t = if escribiendo.is_some() && li + 1 == lineas.len() {
+                        format!("{l}|") } else { l.clone() };
+                    d.texto_f(ui::Familia::Mano, fx + 8.0, y + 3.0 + li as f32 * 17.0,
+                              &t, 15.0, paleta::TINTA);
+                }
+                y += 20.0 + 17.0 * lineas.len().max(1) as f32;
+                let fila = |d: &mut ui::Dibujo, y: f32, k: &str, v: &str| {
+                    d.texto(fx + 4.0, y, k, 8.5, paleta::TINTA_TENUE);
+                    d.texto(fx + 108.0, y, v, 9.5, paleta::TINTA);
+                };
+                fila(&mut d, y, "entra", &format!("{:.2} s", sb.t0)); y += 15.0;
+                fila(&mut d, y, "sale", &format!("{:.2} s", sb.t1)); y += 15.0;
+                fila(&mut d, y, "dura", &format!("{:.2} s", sb.dur())); y += 15.0;
+                // la velocidad de lectura: el número que de verdad importa
+                let cps = vivo.chars().count() as f64 / sb.dur().max(0.1);
+                fila(&mut d, y, "caracteres/s", &format!("{cps:.1}{}", 
+                     if cps > 21.0 { "  ¡corre!" } else { "" })); y += 15.0;
+                fila(&mut d, y, "en la pista", &format!("{} de {}", is + 1, pr.subs.len()));
+                y += 22.0;
+                d.texto_f(ui::Familia::Grot, fx + 4.0, y, "EL ESTILO DE LA PISTA", 9.0,
+                          paleta::TINTA); y += 16.0;
+                let e = &pr.estilo_sub;
+                let bot = |d: &mut ui::Dibujo, x: f32, y: f32, t: &str, on: bool| {
+                    trazo::caja(d, x, y, 74.0, 20.0, 1.2,
+                                if on { paleta::ROJO } else { paleta::TINTA_TENUE }, 941);
+                    d.texto(x + 6.0, y + 5.0, t, 8.0,
+                            if on { paleta::ROJO } else { paleta::TINTA });
+                };
+                // la Y sale del MISMO sitio que la lee el ratón
+                let (ex, ey) = (fx + 4.0, self.pie_estilo_y(pr, is));
+                let _ = y;
+                bot(&mut d, ex, ey, subtitulo::FAMILIAS[(e.familia as usize).min(2)].0,
+                    false);
+                bot(&mut d, ex + 80.0, ey, subtitulo::TINTAS[(e.tinta as usize).min(3)].0,
+                    false);
+                bot(&mut d, ex, ey + 24.0, &format!("cuerpo {:.1}%", e.cuerpo * 100.0), false);
+                bot(&mut d, ex + 80.0, ey + 24.0, &format!("alto {:.0}%", e.margen * 100.0),
+                    false);
+                bot(&mut d, ex, ey + 48.0,
+                    &format!("sombra {:.0}%", e.sombra * 100.0), e.sombra > 0.01);
+                bot(&mut d, ex + 80.0, ey + 48.0,
+                    if e.caja > 0.01 { "con caja" } else { "sin caja" }, e.caja > 0.01);
+                bot(&mut d, ex, ey + 72.0,
+                    if e.mayusculas { "MAYÚSCULAS" } else { "normal" }, e.mayusculas);
+                bot(&mut d, ex + 80.0, ey + 72.0, &format!("{} letras", e.ancho_linea), false);
+                bot(&mut d, ex, ey + 96.0, "partir aquí", false);
+                bot(&mut d, ex + 80.0, ey + 96.0, "quitar (⌫)", false);
+                d.texto(fx + 4.0, ey + 122.0, "clic en el texto: escribirlo · ⏎ guarda",
+                        8.0, paleta::TINTA_TENUE);
+                d.texto(fx + 4.0, ey + 133.0, "clic en un mando: lo cicla · ⇧+clic: atrás",
+                        8.0, paleta::TINTA_TENUE);
+                d.texto(fx + 4.0, ey + 144.0, "los bordes del bloque estiran el tiempo",
                         8.0, paleta::TINTA_TENUE);
             }
         } else
@@ -9464,6 +9906,41 @@ impl Estado {
         // con su tiempo en pequeño. Mover la aguja NO la mueve: esa es la
         // gracia — se puede cortar en un punto sin perder el sitio donde
         // estabas mirando.
+        // ── EL CARRIL DEL PIE (subtitulo.rs) ────────────────────────────
+        // Debajo de la tira, que es donde va un subtítulo: entre la imagen y
+        // el sonido. Cada bloque con su texto dentro; el elegido, en rojo.
+        if self.hay_pie(pr) {
+            let sy = self.sub_y();
+            d2.texto(Self::ESTANTE_W + 4.0, sy + 6.0, "PIE", 7.5, paleta::TINTA_TENUE);
+            trazo::linea(&mut d2, Self::ESTANTE_W + 24.0, sy + Self::ALTO_SUB - 2.0,
+                         ancho - 8.0, sy + Self::ALTO_SUB - 2.0, 1.0,
+                         [0.2, 0.18, 0.15, 0.16], 1470);
+            for (k, sb) in pr.subs.iter().enumerate() {
+                let x0 = self.x_de(sb.t0).max(Self::ESTANTE_W + 24.0);
+                let x1 = self.x_de(sb.t1).min(ancho);
+                if x1 <= x0 { continue; }
+                let elegido = self.sel_sub == Some(k);
+                d2.rect(x0, sy, x1 - x0, Self::ALTO_SUB - 5.0,
+                        if elegido { [0.851, 0.2, 0.145, 0.22] }
+                        else { [0.169, 0.231, 0.78, 0.10] });
+                trazo::caja(&mut d2, x0, sy, x1 - x0, Self::ALTO_SUB - 5.0,
+                            if elegido { 1.6 } else { 1.0 },
+                            if elegido { paleta::ROJO } else { [0.2, 0.18, 0.15, 0.7] },
+                            1480 + k as u32);
+                // el texto dentro, si cabe (y lo que se está escribiendo)
+                let escribiendo = self.escribiendo_sub.as_ref()
+                    .filter(|(j, _)| *j == k).map(|(_, t)| t.clone());
+                let cuantos = (((x1 - x0) - 10.0) / 4.6).max(0.0) as usize;
+                if cuantos > 2 {
+                    let t: String = escribiendo.clone().unwrap_or_else(|| sb.texto.clone())
+                        .chars().take(cuantos).collect();
+                    let t = if escribiendo.is_some() { format!("{t}|") } else { t };
+                    d2.texto(x0 + 5.0, sy + 3.0, &t, 8.0,
+                             if elegido { paleta::ROJO } else { paleta::TINTA });
+                }
+            }
+        }
+
         // ── EL CARRIL DE LA CAPA (CAPAS §7) ─────────────────────────────
         // Tiras finas encima de la tira de vídeo: se ve QUÉ hay encima y
         // CUÁNDO. La elegida, en rojo; los fundidos, como cuñas.

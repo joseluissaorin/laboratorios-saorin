@@ -109,7 +109,14 @@ fn save_index(d: &Dirs, idx: &serde_json::Map<String, serde_json::Value>) {
 
 /// resuelve un nombre de la estantería a su fichero real
 fn resolve_media(d: &Dirs, name: &str) -> PathBuf {
-    let name = Path::new(name).file_name().unwrap_or_default();
+    // UNA RUTA ENTERA QUE EXISTE ES LA RUTA: antes se le quitaba la carpeta
+    // siempre y se buscaba en media/, así que un fichero del taller que no
+    // viviera ahí —los PNG del pie, en .subs/— no se encontraba nunca.
+    let tal_cual = Path::new(name);
+    if tal_cual.is_absolute() && tal_cual.is_file() {
+        return tal_cual.to_path_buf();
+    }
+    let name = tal_cual.file_name().unwrap_or_default();
     let local = d.media.join(name);
     if local.is_file() {
         return local;
@@ -2519,6 +2526,88 @@ pub fn cli(args: &[String]) -> i32 {
         Some("media") => {
             println!("{}", media_json(&d));
             0
+        }
+        // ── EL OÍDO: subtítulos automáticos, en casa y sin red ─────────
+        Some("oye") => {
+            let arg = |k: &str| args.iter().position(|a| a == k)
+                .and_then(|i| args.get(i + 1)).cloned();
+            // o UN fichero (--media) o LA BOBINA ENTERA (--trabajos, una
+            // lista de planos con su trozo y su sitio): con la lista el
+            // modelo se carga UNA vez, que es lo caro
+            let lista: Vec<crate::oido::Trabajo> = match arg("--trabajos") {
+                Some(f) => {
+                    let v: serde_json::Value = std::fs::read(&f).ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .unwrap_or(serde_json::json!([]));
+                    v.as_array().cloned().unwrap_or_default().iter().map(|j| {
+                        crate::oido::Trabajo {
+                            fichero: resolve_media(&d, j["file"].as_str().unwrap_or("")),
+                            t_in: j["in"].as_f64().unwrap_or(0.0),
+                            t_out: j["out"].as_f64().unwrap_or(0.0),
+                            desde: j["desde"].as_f64().unwrap_or(0.0),
+                            velocidad: j["speed"].as_f64().unwrap_or(1.0),
+                        }
+                    }).collect()
+                }
+                None => Vec::new(),
+            };
+            let media = arg("--media").unwrap_or_default();
+            if lista.is_empty() && media.is_empty() {
+                eprintln!("falta --media o --trabajos"); return 2;
+            }
+            let ruta = resolve_media(&d, &media);
+            let idioma = arg("--idioma").unwrap_or_else(|| "es".into());
+            let cual = arg("--modelo").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+            let salida = arg("--out").map(PathBuf::from)
+                .unwrap_or_else(|| d.tmp.join("subs.srt"));
+            let aviso = |m: &str| {
+                diario(m);
+                set_render(|s| { s.state = "running".into();
+                                 s.step = m.to_string(); s.pct = 0.35; });
+            };
+            set_render(|s| { s.state = "running".into();
+                             s.step = "el oído: preparando".into(); s.pct = 0.05; });
+            // el modelo vive en el TALLER (la carpeta madre de media/), no
+            // en project.json — que es un fichero, no una carpeta
+            let taller = d.media.parent().unwrap_or(&d.media).to_path_buf();
+            let r = crate::oido::modelo(&taller, cual, &aviso)
+                .and_then(|m| {
+                    set_render(|s| { s.pct = 0.25; s.step = "el oído: escuchando".into(); });
+                    if lista.is_empty() {
+                        crate::oido::escucha(&m, &ffbin("ffmpeg"), &ruta, &idioma, &aviso)
+                    } else {
+                        crate::oido::escucha_bobina(&m, &ffbin("ffmpeg"), &lista, &idioma, &aviso)
+                    }
+                });
+            match r {
+                Ok(trozos) => {
+                    let texto = crate::oido::srt(&trozos);
+                    if let Some(p) = salida.parent() { std::fs::create_dir_all(p).ok(); }
+                    if let Err(e) = std::fs::write(&salida, texto) {
+                        eprintln!("no pude escribir {}: {e}", salida.display());
+                        set_render(|s| { s.state = "error".into(); s.step = format!("{e}"); });
+                        return 1;
+                    }
+                    diario(&format!("EL OÍDO: {} trozo(s) → {}", trozos.len(), salida.display()));
+                    let ruta_s = salida.to_string_lossy().to_string();
+                    set_render(move |s| {
+                        s.state = "done".into();
+                        s.step = "subtítulos escritos".into();
+                        s.pct = 1.0;
+                        s.out = ruta_s.clone();
+                    });
+                    println!("{}", serde_json::json!({"state": "done",
+                        "out": salida.to_string_lossy(), "trozos": trozos.len()}));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("el oído falló: {e}");
+                    let m = e.clone();
+                    set_render(move |s| { s.state = "error".into(); s.step = m.clone(); });
+                    println!("{}", serde_json::json!({"state": "error", "error": e}));
+                    1
+                }
+            }
         }
         Some("luts") => {
             println!("{}", luts_json());
