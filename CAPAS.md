@@ -190,6 +190,20 @@ Por tanto:
   están escritos; **el GPD está apagado** y no se ha podido compilar ni ver.
   Nada de esta tanda está en Windows todavía.
 
+## El pie, encima de todo esto (3-ago)
+
+Los **subtítulos** no son una capa más para el autor —tienen pista propia,
+texto que se corrige y un estilo de toda la pista (`subtitulo.rs`, PENDIENTE
+§10)— pero para el motor SÍ lo son: cada línea se rasteriza a un PNG con su
+alfa y viaja por `clips2` en la pista de más arriba. Ni el revelado ni la
+preview saben qué es un subtítulo, y por eso salen idénticos.
+
+Consecuencia a tener en cuenta: cada línea es una FUENTE, y las fuentes se
+abren todas al empezar. Con el PNG recortado al texto son ~0,4 MB cada una
+(un lienzo entero serían 8), así que una bobina de cien subtítulos gasta unos
+40 MB de textura. Para una pieza corta sobra; para un largo habría que darle
+al motor un camino propio.
+
 ## Los límites que quedan, dichos claros
 
 - ocho pistas de vídeo sobre la base y ocho carriles de música; las OCHO
