@@ -2539,6 +2539,22 @@ impl ApplicationHandler for App {
                     }
                     PhysicalKey::Code(KeyCode::KeyB) => e.cuchilla(&mut self.proyecto),
                     PhysicalKey::Code(KeyCode::Backspace) | PhysicalKey::Code(KeyCode::Delete) => {
+                        // ¿hay un SUBTÍTULO elegido? fuera él (lo primero: es
+                        // lo que más se borra al repasar una transcripción)
+                        if let Some(k) = e.sel_sub.take() {
+                            if k < self.proyecto.subs.len() {
+                                e.recuerda(&self.proyecto);
+                                let q = self.proyecto.subs.remove(k);
+                                let _ = self.proyecto.guarda();
+                                let (pw2, ph2) = e.lienzo_del_master(&self.proyecto);
+                                self.proyecto.refresca_pie(pw2 as u32, ph2 as u32);
+                                e.visor.olvida_capas();
+                                e.visor.foley(sonido::Foley::Corte);
+                                e.di(&format!("fuera «{}»",
+                                    q.texto.chars().take(24).collect::<String>()));
+                            }
+                            return;
+                        }
                         // ¿hay una CAPA elegida? fuera ella
                         if let Some(k) = e.sel_capa.take() {
                             if k < self.proyecto.capas.len() {
@@ -8230,6 +8246,8 @@ impl Estado {
                         // seleccionar: la ficha pasa a ser la de esta pista
                         self.sel_audio = Some(i);
                         self.sel = None;
+                        self.sel_sub = None;
+                        self.escribiendo_sub = None;
                         self.seleccion.clear();
                         // LAS DOS ZONAS DE TIRADOR NO SE PISAN. Antes eran
                         // ±7 px alrededor de cada borde, y con dos trozos
@@ -8273,6 +8291,8 @@ impl Estado {
                     }
                     self.sel = Some(i);
                     self.sel_audio = None;
+                    self.sel_sub = None;
+                    self.escribiendo_sub = None;
                     self.arrastrando = if (mx - x0).abs() <= 7.0 { Arrastre::TrimI(i) }
                                        else if (mx - x1).abs() <= 7.0 { Arrastre::TrimD(i) }
                                        else { Arrastre::ClipMueve(i) };

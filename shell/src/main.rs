@@ -6,6 +6,10 @@
 
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+#[cfg(feature = "oido")]
+mod oido;
+#[cfg(not(feature = "oido"))]
+#[path = "oido_no.rs"]
 mod oido;
 mod server;
 
