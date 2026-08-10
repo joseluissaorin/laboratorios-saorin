@@ -231,8 +231,16 @@ Tres trampas, ninguna del código del pie:
    bloque `[target.'cfg(target_os = "macos")'.dependencies]`. En el Mac
    seguían resolviéndose y en Windows desaparecieron las cinco — 136 errores
    de importación en un crate intacto. **Un fallo que sólo se ve en la otra
-   máquina es el más caro de todos**; por eso ahora winlab se comprueba en
-   cruzado desde el Mac (`cargo check --target x86_64-pc-windows-msvc`).
+   máquina es el más caro de todos**; por eso ahora se comprueba en cruzado
+   desde el Mac, y va gratis:
+
+       cargo check --manifest-path winlab/Cargo.toml --target x86_64-pc-windows-msvc
+       cargo check --manifest-path nativa/Cargo.toml --target x86_64-pc-windows-msvc
+
+   (El shell no se puede: `zstd-sys` necesita un compilador de C para MSVC.
+   Ése hay que compilarlo en el GPD.) Esto destapó de paso un préstamo
+   imposible en el código de CAPAS de winlab que llevaba dos días escrito y
+   sin compilar nunca.
 
 ## Lo único que sigue pendiente
 
