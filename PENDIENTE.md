@@ -253,6 +253,12 @@ que no se pinta (la lección de la ficha de la música, otra vez).
 ✅ **Y la ventana se cierra sola** cuando el oído termina. Antes había que
 adivinar si había acabado y cerrarla a mano.
 
+✅ **Y la velocidad del clip, también desplegable.** Era un ciclo a ciegas de
+nueve marchas donde llegar a «marcha atrás» eran siete clics, y el rótulo
+decía «×-2.00» en vez de decir qué es. Ahora se abre la lista con sus
+nombres: *marcha atrás*, *fotograma congelado*, *muy lento · ×0,25*… Con la
+lista abierta, la ficha de debajo no se dibuja, por lo mismo de siempre.
+
 ### La segunda vuelta del pie (lo que se vio usándolo)
 
 ✅ **Salían párrafos, no subtítulos.** Era lo más grave: whisper devuelve

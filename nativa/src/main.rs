@@ -390,6 +390,8 @@ struct Estado {
     oido_desde: std::time::Instant,
     /// qué desplegable está desplegado (ninguno = None)
     oido_abierto: Option<usize>,
+    /// el desplegable de las marchas de un clip, si está abierto
+    marchas_abiertas: Option<usize>,
     /// el tramo que se va a escuchar, en segundos de bobina
     oido_a: f64,
     oido_b: f64,
@@ -840,6 +842,7 @@ impl ApplicationHandler for App {
             oyendo: None,
             oido_desde: std::time::Instant::now(),
             oido_abierto: None,
+            marchas_abiertas: None,
             oido_a: 0.0,
             oido_b: 0.0,
             oido_tirador: None,
@@ -4393,6 +4396,25 @@ impl Estado {
         self.visor.marca_cuarto(i);
         self.visor.foley(sonido::Foley::Tick);
         self.di(&format!("stock {} sobre el baño", STOCKS[k].0));
+    }
+
+    /// LAS MARCHAS DEL GRAMÓFONO, con su nombre. Estaban escritas en dos
+    /// sitios (el clic y el atajo) y sin nombre: «×-2.00» no dice «marcha
+    /// atrás», y hasta llegar a ella había siete clics a ciegas.
+    const MARCHAS: [(f64, &'static str); 9] = [
+        (-2.0, "marcha atrás ×2"),
+        (-1.0, "marcha atrás"),
+        (0.0, "fotograma congelado"),
+        (0.25, "muy lento · ×0,25"),
+        (0.5, "lento · ×0,5"),
+        (1.0, "normal · ×1"),
+        (1.5, "vivo · ×1,5"),
+        (2.0, "rápido · ×2"),
+        (4.0, "muy rápido · ×4"),
+    ];
+
+    fn marcha_de(v: f64) -> usize {
+        Self::MARCHAS.iter().position(|(x, _)| (x - v).abs() < 0.01).unwrap_or(5)
     }
 
     /// LOS TAMAÑOS DE LA COPIA: el lienzo, el doble y el cuádruple. Con el
@@ -8232,29 +8254,38 @@ impl Estado {
             // LA VELOCIDAD (§4bis.3): el clic cicla las marchas del gramófono
             // —ahora con la MARCHA ATRÁS y el CONGELADO dentro—, el arrastre
             // la mueve fina y el doble clic la escribe a mano.
-            if my >= y2 - 6.0 && my <= y2 + 14.0 {
-                if self.mods.alt_key() {
-                    self.recuerda(pr);
-                    pr.clips[i].speed = 1.0;
-                    let _ = pr.guarda();
-                    self.visor.busca(pr, self.visor.t);
-                    self.di("velocidad ×1");
+            // LA VELOCIDAD: el desplegable de las marchas
+            {
+                let marchas: Vec<String> = Self::MARCHAS.iter()
+                    .map(|(_, n)| n.to_string()).collect();
+                let dd = mandos::Desplegable {
+                    x: fx + 12.0, y: y2 - 14.0, ancho: fw - 24.0, rotulo: "VELOCIDAD",
+                    opciones: &marchas,
+                    elegida: Self::marcha_de(pr.clips[i].speed) };
+                if let Some(_) = self.marchas_abiertas {
+                    let elegida = dd.opcion_en(alto, mx, my);
+                    self.marchas_abiertas = None;
+                    if let Some(k) = elegida {
+                        self.recuerda(pr);
+                        pr.clips[i].speed = Self::MARCHAS[k].0;
+                        let _ = pr.guarda();
+                        self.visor.busca(pr, self.visor.t);
+                        self.di(Self::MARCHAS[k].1);
+                    }
                     return;
                 }
-                self.recuerda(pr);
-                let pasos = [-2.0, -1.0, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
-                let c = &mut pr.clips[i];
-                let k = pasos.iter().position(|p| (p - c.speed).abs() < 0.01).unwrap_or(5);
-                c.speed = pasos[(k + 1) % pasos.len()];
-                let _ = pr.guarda();
-                let v = pr.clips[i].speed;
-                self.visor.busca(pr, self.visor.t);
-                self.di(&match v {
-                    v if v.abs() < 0.02 => "fotograma CONGELADO".to_string(),
-                    v if v < 0.0 => format!("marcha atrás ×{:.2}", -v),
-                    v => format!("velocidad ×{v:.2}"),
-                });
-                return;
+                if dd.en_la_caja(mx, my) {
+                    if self.mods.alt_key() {
+                        self.recuerda(pr);
+                        pr.clips[i].speed = 1.0;
+                        let _ = pr.guarda();
+                        self.visor.busca(pr, self.visor.t);
+                        self.di("velocidad ×1");
+                    } else {
+                        self.marchas_abiertas = Some(i);
+                    }
+                    return;
+                }
             }
             // «volver a enlazar» el material ausente (§4)
             if pr.clips[i].ausente && my >= fy + 42.0 && my <= fy + 64.0
@@ -9330,11 +9361,33 @@ impl Estado {
                 d.texto(fx + 156.0, y1 + 3.0, &format!("{:.1}s", c.dur()), 10.0, paleta::TINTA);
                 d.texto(fx + 12.0, y1 - 11.0, "ENTRADA", 6.0, paleta::TINTA_TENUE);
                 d.texto(fx + 84.0, y1 - 11.0, "SALIDA", 6.0, paleta::TINTA_TENUE);
-                // velocidad (clic: cicla) + sello si no es 1
+                // LA VELOCIDAD, en un desplegable: se ven las marchas que hay
+                // y se va directo a la que se quiere, con su nombre
+                let mut marchas_abiertas_aqui: Option<(f32, f32, f32, usize)> = None;
                 let y2 = y1 + 34.0;
-                d.texto(fx + 12.0, y2, "velocidad", 9.0, paleta::TINTA);
-                d.texto(fx + 84.0, y2, &format!("×{:.2}", c.speed), 10.0, paleta::TINTA);
-                d.texto(fx + 132.0, y2 + 1.0, "(clic: cicla)", 7.0, paleta::TINTA_TENUE);
+                let marchas: Vec<String> = Self::MARCHAS.iter()
+                    .map(|(_, n)| n.to_string()).collect();
+                let dd = mandos::Desplegable {
+                    x: fx + 12.0, y: y2 - 14.0, ancho: fw - 24.0, rotulo: "VELOCIDAD",
+                    opciones: &marchas, elegida: Self::marcha_de(c.speed) };
+                let sobre = dd.en_la_caja(self.raton.0, self.raton.1)
+                    && self.marchas_abiertas.is_none();
+                dd.dibuja(&mut d, sobre, 63);
+                // CON LA LISTA ABIERTA NO SE DIBUJA EL RESTO DE LA FICHA: en
+                // este taller el texto va siempre por encima de los
+                // rectángulos, así que lo que se tapa es lo que no se pinta.
+                marchas_abiertas_aqui = if self.marchas_abiertas == Some(i) {
+                    Some((dd.x, dd.y, dd.ancho, Self::marcha_de(c.speed)))
+                } else { None };
+                if let Some((lx, ly, lw, sel)) = marchas_abiertas_aqui {
+                    let dd2 = mandos::Desplegable {
+                        x: lx, y: ly, ancho: lw, rotulo: "VELOCIDAD",
+                        opciones: &marchas, elegida: sel };
+                    dd2.dibuja_abierta(&mut d, alto, self.raton, 97);
+                    d.texto(fx + 12.0, alto - 26.0,
+                            "elige una marcha · o pulsa fuera", 8.0, paleta::TINTA_TENUE);
+                }
+                if marchas_abiertas_aqui.is_none() {
                 if (c.speed - 1.0).abs() > 0.01 {
                     d.rect_rot(fx + fw - 46.0, y2 - 6.0, 34.0, 20.0, -0.12, [0.851, 0.2, 0.145, 0.14]);
                     trazo::caja(&mut d, fx + fw - 46.0, y2 - 6.0, 34.0, 20.0, 1.2, paleta::ROJO, 62);
@@ -9485,6 +9538,7 @@ impl Estado {
                     let nn: String = c.nota.chars().take(28).collect();
                     d.texto_f(ui::Familia::Mano, fx + 18.0, y9 + 4.0, &nn, 14.0, [0.2, 0.16, 0.05, 1.0]);
                 }
+                }   // ← fin del «si no hay lista de marchas abierta»
             }
             _ => {
                 // sin clip: EL PARTE DEL PROYECTO
