@@ -44,6 +44,20 @@ pub const TINTAS: [(&str, [f32; 3]); 4] = [
     ("tinta", [0.106, 0.098, 0.086]),
 ];
 
+/// LOS IDIOMAS que el oído entiende de una lista corta. El código es el que
+/// espera whisper; `""` es «que lo adivine él», que sirve cuando la bobina
+/// mezcla lenguas pero acierta menos en frases sueltas.
+pub const IDIOMAS: [(&str, &str); 8] = [
+    ("español", "es"),
+    ("inglés", "en"),
+    ("gallego", "gl"),
+    ("catalán", "ca"),
+    ("portugués", "pt"),
+    ("francés", "fr"),
+    ("italiano", "it"),
+    ("lo adivina", ""),
+];
+
 /// EL ESTILO DEL PIE, para toda la pista.
 ///
 /// El de casa es **clásico y moderno a la vez** a propósito: letra con
@@ -68,6 +82,9 @@ pub struct Estilo {
     pub mayusculas: bool,
     /// cuántos caracteres por línea antes de partir
     pub ancho_linea: u32,
+    /// EN QUÉ LENGUA se escucha (índice de `IDIOMAS`). Va con el estilo
+    /// porque es de la pista entera, no de cada línea.
+    pub idioma: u8,
 }
 
 impl Default for Estilo {
@@ -82,6 +99,7 @@ impl Default for Estilo {
             margen: 0.085,
             mayusculas: false,
             ancho_linea: 40,
+            idioma: 0,
         }
     }
 }
@@ -92,7 +110,7 @@ impl Estilo {
             "familia": self.familia, "cuerpo": self.cuerpo, "tinta": self.tinta,
             "sombra": self.sombra, "borde": self.borde, "caja": self.caja,
             "margen": self.margen, "mayusculas": self.mayusculas,
-            "ancho_linea": self.ancho_linea,
+            "ancho_linea": self.ancho_linea, "idioma": self.idioma,
         })
     }
 
@@ -111,6 +129,8 @@ impl Estilo {
             mayusculas: v["mayusculas"].as_bool().unwrap_or(d.mayusculas),
             ancho_linea: v["ancho_linea"].as_u64().unwrap_or(d.ancho_linea as u64)
                 .clamp(16, 80) as u32,
+            idioma: v["idioma"].as_u64().unwrap_or(d.idioma as u64)
+                .min(IDIOMAS.len() as u64 - 1) as u8,
         }
     }
 

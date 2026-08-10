@@ -3122,6 +3122,16 @@ impl Estado {
             A::InsertaBobina => self.inserta_bobina(pr),
             A::MarcasCompas => self.marcas_al_compas(pr),
             A::Subtitular => self.pon_el_oido(pr),
+            // LA LENGUA se elige ANTES de escuchar, y antes de escuchar no hay
+            // ningún subtítulo que elegir para llegar a su ficha: por eso está
+            // también aquí
+            A::IdiomaSub => {
+                let n = subtitulo::IDIOMAS.len() as u8;
+                pr.estilo_sub.idioma = (pr.estilo_sub.idioma + 1) % n;
+                let _ = pr.guarda();
+                self.di(&format!("el pie se escucha en {}",
+                    subtitulo::IDIOMAS[pr.estilo_sub.idioma as usize].0));
+            }
             A::PieFuera => {
                 if pr.subs.is_empty() { self.di("no hay subtítulos que quitar"); }
                 else {
@@ -6968,7 +6978,8 @@ impl Estado {
         match std::process::Command::new(&bin)
             .args(["cli", "oye", "--trabajos", lista.to_str().unwrap_or(""),
                    // sin «--modelo»: lo elige el taller según la máquina
-                   "--idioma", "es",
+                   "--idioma", subtitulo::IDIOMAS[(pr.estilo_sub.idioma as usize)
+                                                  .min(subtitulo::IDIOMAS.len() - 1)].1,
                    "--out", srt.to_str().unwrap_or("")])
             .env("FL_MEDIA", pr.base.join("media"))
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
@@ -7616,7 +7627,7 @@ impl Estado {
                 let col = if mx >= fx + 4.0 && mx <= fx + 78.0 { Some(0) }
                           else if mx >= fx + 84.0 && mx <= fx + 158.0 { Some(1) }
                           else { None };
-                let fila = if my >= ey && my <= ey + 116.0 {
+                let fila = if my >= ey && my <= ey + 140.0 {
                     Some(((my - ey) / 24.0).floor() as usize) } else { None };
                 if let (Some(c), Some(f)) = (col, fila) {
                     let atras = self.mods.shift_key();
@@ -7632,6 +7643,7 @@ impl Estado {
                     let e = &mut pr.estilo_sub;
                     let mut quitar = false;
                     let mut partir = false;
+                    let mut volver_a_oir = false;
                     match (f, c) {
                         (0, 0) => e.familia = (e.familia + 1) % 3,
                         (0, 1) => e.tinta = (e.tinta + 1) % 4,
@@ -7642,8 +7654,10 @@ impl Estado {
                         (3, 0) => e.mayusculas = !e.mayusculas,
                         (3, 1) => e.ancho_linea = if e.ancho_linea >= 46 { 28 }
                                                   else { e.ancho_linea + 6 },
-                        (4, 0) => partir = true,
-                        (4, 1) => quitar = true,
+                        (4, 0) => e.idioma = (e.idioma + 1) % subtitulo::IDIOMAS.len() as u8,
+                        (4, 1) => volver_a_oir = true,
+                        (5, 0) => partir = true,
+                        (5, 1) => quitar = true,
                         _ => {}
                     }
                     if quitar {
@@ -7672,6 +7686,7 @@ impl Estado {
                     let _ = pr.guarda();
                     self.refresca_pie(pr);
                     self.visor.foley(sonido::Foley::Tick);
+                    if volver_a_oir { self.pon_el_oido(pr); }
                     return;
                 }
                 return;
@@ -9226,13 +9241,18 @@ impl Estado {
                 bot(&mut d, ex, ey + 72.0,
                     if e.mayusculas { "MAYÚSCULAS" } else { "normal" }, e.mayusculas);
                 bot(&mut d, ex + 80.0, ey + 72.0, &format!("{} letras", e.ancho_linea), false);
-                bot(&mut d, ex, ey + 96.0, "partir aquí", false);
-                bot(&mut d, ex + 80.0, ey + 96.0, "quitar (⌫)", false);
-                d.texto(fx + 4.0, ey + 122.0, "clic en el texto: escribirlo · ⏎ guarda",
+                // EL IDIOMA es de la pista y manda en el oído: se pone ANTES
+                // de escuchar, y por eso vive aquí y no en un diálogo aparte
+                bot(&mut d, ex, ey + 96.0,
+                    subtitulo::IDIOMAS[(e.idioma as usize).min(7)].0, true);
+                bot(&mut d, ex + 80.0, ey + 96.0, "escuchar otra vez", false);
+                bot(&mut d, ex, ey + 120.0, "partir aquí", false);
+                bot(&mut d, ex + 80.0, ey + 120.0, "quitar (⌫)", false);
+                d.texto(fx + 4.0, ey + 146.0, "clic en el texto: escribirlo · ⏎ guarda",
                         8.0, paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, ey + 133.0, "clic en un mando: lo cicla · ⇧+clic: atrás",
+                d.texto(fx + 4.0, ey + 157.0, "clic en un mando: lo cicla · ⇧+clic: atrás",
                         8.0, paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, ey + 144.0, "los bordes del bloque estiran el tiempo",
+                d.texto(fx + 4.0, ey + 168.0, "los bordes del bloque estiran el tiempo",
                         8.0, paleta::TINTA_TENUE);
             }
         } else

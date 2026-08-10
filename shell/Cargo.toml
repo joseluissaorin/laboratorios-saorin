@@ -17,6 +17,11 @@ percent-encoding = "2"
 # CPU (el HX 370 es Zen 5 con AVX-512 y doce núcleos, y ggml los usa).
 whisper-rs = { version = "0.16", default-features = false, optional = true }
 
+# EN WINDOWS, VULKAN: el oído corre en la Radeon 890M en vez de en la CPU.
+# Pide el SDK de Vulkan instalado para compilar (glslc y las cabeceras).
+[target.'cfg(target_os = "windows")'.dependencies]
+whisper-rs = { version = "0.16", default-features = false, features = ["vulkan"], optional = true }
+
 # Metal SOLO en el Mac: en Windows ni existe, y pedirlo allí no compila.
 # OJO: aquí abajo sólo va lo que es DE ESTA PLATAFORMA. Lo común vive arriba —
 # poner una dependencia común en este bloque la hace desaparecer en Windows y

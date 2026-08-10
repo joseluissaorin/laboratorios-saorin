@@ -30,7 +30,7 @@ pub const MODELOS: [(&str, &str, u64); 3] = [
 /// 34 segundos de sonido, o sea 0,06×. En CPU el que sirve es el ligero.
 /// Quien quiera el bueno en Windows puede pedirlo y esperar.
 pub fn el_de_esta_maquina() -> usize {
-    if cfg!(target_os = "macos") { 1 } else { 0 }
+    if hay_gpu() { 1 } else { 0 }
 }
 
 fn nombre_modelo(url: &str) -> &str {
@@ -151,8 +151,16 @@ fn cuantos_hilos() -> usize {
 /// allí se busca con haz corto: sigue siendo mejor que el muestreo voraz y
 /// no convierte un minuto de bobina en diez de espera.
 fn como_buscar() -> whisper_rs::SamplingStrategy {
-    let haz = if cfg!(target_os = "macos") { 5 } else { 2 };
+    let haz = if hay_gpu() { 5 } else { 2 };
     whisper_rs::SamplingStrategy::BeamSearch { beam_size: haz, patience: 1.0 }
+}
+
+/// ¿HAY MOTOR GRÁFICO DETRÁS? Metal en el Mac, Vulkan en Windows (la Radeon
+/// 890M del GPD). Con GPU se puede pedir el modelo bueno y el haz largo; a
+/// pelo con la CPU, ni una cosa ni la otra.
+pub fn hay_gpu() -> bool {
+    cfg!(any(feature = "metal", feature = "vulkan"))
+        || cfg!(target_os = "macos") || cfg!(target_os = "windows")
 }
 
 /// TRANSCRIBIR. `idioma` vacío = que lo detecte él.
