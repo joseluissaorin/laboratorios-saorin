@@ -245,7 +245,14 @@ en el motor del oído igual que Metal en el Mac. Lo que costó montarlo ahí:
   «instancia»)… y **borrar el `whisper-rs-sys-*` de `target`**, porque el
   `CMakeCache.txt` de la tentativa anterior se acuerda de la instancia y la
   vuelve a imponer aunque ya no esté en el entorno. Cambiar de generador
-  obliga a configurar desde cero.
+  obliga a configurar desde cero;
+- y **compilar el shell en una carpeta corta** (`CARGO_TARGET_DIR=C:\fl`).
+  El proyecto anidado del generador de shaders cuelga de `target/` y su ruta
+  —`…\whisper-rs-sys-…\out\build\ggml\src\ggml-vulkan\
+  vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\
+  CMakeScratch\TryCompile-…`— pasa de los 260 caracteres de Windows: el
+  enlazador casca con `LNK1104` al no poder abrir su propio manifiesto. En
+  `C:\fl` cabe. `instala.ps1` coge el binario de ahí.
 
 Los tres están en `compilatodo.bat` del GPD.
 
