@@ -84,11 +84,21 @@ bordes se pegan al ritmo solos. A lo que no tiene pulso se le dice que no lo
 tiene, no se le inventa.
 
 **El pie (subtítulos)** — pista propia debajo de la tira. Se transcriben
-solos con un modelo local desde **su propia ventana** (la lengua, qué trozo,
-de qué sonido, qué modelo, y una barra que dice por dónde va), se corrigen
-escribiendo encima, se mueven y se estiran por los bordes, se parten por la
-aguja. Salen **frase a frase** como debe ser —cortados por palabra, dos
-renglones, entre uno y siete segundos en pantalla— y no en párrafos.
+solos con un modelo local desde **su propia ventana** (la lengua, qué trozo
+—con dos tiradores—, de qué sonido, qué modelo y cuántas letras por renglón,
+todo en desplegables, con una barra que dice por dónde va y que se cierra
+sola al acabar).
+
+El oído devuelve **las palabras con su segundo** (alineadas por DTW, no los
+sellos groseros del tramo) y **el que arma los subtítulos es la app**: corta
+donde hay punto, donde hay una pausa, donde el modelo rompía, donde ya no
+cabe en **dos renglones** y donde pasaría de siete segundos. Nunca parte una
+palabra y nunca saca tres renglones. Y como las palabras se guardan,
+**cambiar de idea es gratis**: elegir otro ancho recompone la pista entera al
+instante, sin volver a escuchar.
+
+Se corrigen escribiendo encima, se mueven y se estiran por los bordes, se
+parten por la aguja.
 
 El estilo es de toda la pista: letra, **negrita**, *cursiva*, **color
 libre** (tres números, con seis atajos de la casa), cuerpo, altura, sombra,
