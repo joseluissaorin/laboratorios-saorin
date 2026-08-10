@@ -127,13 +127,20 @@ fn pcm16k_trozo(ffmpeg: &str, media: &Path, desde: f64, dur: f64)
         .collect())
 }
 
-/// CUÁNTOS HILOS. ggml quiere **núcleos físicos**, no hilos lógicos: con SMT
-/// los dos hermanos se pelean por la misma unidad vectorial y la cuenta va más
-/// lenta que con la mitad. `available_parallelism` cuenta los lógicos, así
-/// que en x86 se parte por dos.
+/// CUÁNTOS HILOS — **medido, no razonado**.
+///
+/// La teoría dice que ggml quiere núcleos FÍSICOS (con SMT los dos hermanos
+/// se pelean por la misma unidad vectorial). Se probó en el HX 370, que tiene
+/// doce núcleos y veinticuatro hilos, sobre los mismos 34 s de sonido:
+///
+///     16 hilos lógicos → 153,6 s        12 físicos → 191,5 s
+///
+/// O sea que la teoría se equivocaba AQUÍ: este chip mezcla cuatro Zen 5 con
+/// ocho Zen 5c, y dejarle al sistema más hilos que colocar le sale mejor que
+/// atarle las manos. Se queda lo que midió mejor. Si alguien vuelve a
+/// «arreglarlo» dividiendo por dos, que lo mida antes.
 fn cuantos_hilos() -> usize {
-    let logicos = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    if cfg!(target_arch = "x86_64") { (logicos / 2).clamp(1, 12) } else { logicos.min(12) }
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16)
 }
 
 /// CÓMO SE BUSCA LA FRASE, según quién trabaje.

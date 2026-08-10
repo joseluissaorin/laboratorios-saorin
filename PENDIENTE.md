@@ -213,6 +213,26 @@ y los dos motores lo dibujan sin saber qué es un subtítulo, y salen idénticos
 El PNG va recortado al texto (un lienzo entero por línea serían 8 MB de
 textura cada uno).
 
+### Lo medido en las dos máquinas (y lo que queda por hacer)
+
+| máquina | modelo | cómo | 34 s de sonido |
+|---|---|---|---|
+| M4 Max (Metal) | large-v3-turbo q5 | haz 5 | **1,6 s · 21,5× tiempo real** |
+| HX 370 (CPU) | small q5_1 | haz 2 · 16 hilos | 153,6 s · **0,2×** |
+| HX 370 (CPU) | small q5_1 | haz 2 · 12 hilos | 191,5 s · 0,2× |
+
+En el Mac vuela. **En el GPD el camino de CPU no da para material largo**:
+son cinco minutos de cuenta por cada minuto de bobina. No es por el build
+—ggml se compila allí con `/arch:AVX512` en Release, comprobado en el log de
+cmake— ni por los hilos: dejarle sólo los doce núcleos físicos salió PEOR
+(191 s) que los dieciséis lógicos (153), porque ese chip mezcla cuatro Zen 5
+con ocho Zen 5c y al planificador le va mejor tener dónde elegir. Es la
+potencia sostenida de un portátil de mano.
+
+**Lo que falta para el GPD: el backend Vulkan sobre la Radeon 890M.** Es lo
+que convierte esa iGPU en el motor del oído, igual que Metal en el Mac. Pide
+el SDK de Vulkan instalado para compilar; no se ha hecho todavía.
+
 ### Lo que costó llevarlo a Windows (para no repetirlo)
 
 Tres trampas, ninguna del código del pie:
