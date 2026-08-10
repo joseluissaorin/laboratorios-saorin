@@ -2604,15 +2604,23 @@ pub fn cli(args: &[String]) -> i32 {
                     }
                 });
             match r {
-                Ok(trozos) => {
+                Ok((trozos, palabras)) => {
                     let texto = crate::oido::srt(&trozos);
                     if let Some(p) = salida.parent() { std::fs::create_dir_all(p).ok(); }
+                    // LAS PALABRAS, al lado del .srt y con su mismo nombre:
+                    // es lo que deja a la app recomponer los subtítulos sin
+                    // volver a escuchar (otro largo de línea, otro corte)
+                    let jpal = salida.with_extension("palabras.json");
+                    if let Err(e) = std::fs::write(&jpal, crate::oido::palabras_json(&palabras)) {
+                        diario(&format!("   ⚠ no pude escribir las palabras: {e}"));
+                    }
                     if let Err(e) = std::fs::write(&salida, texto) {
                         eprintln!("no pude escribir {}: {e}", salida.display());
                         set_render(|s| { s.state = "error".into(); s.step = format!("{e}"); });
                         return 1;
                     }
-                    diario(&format!("EL OÍDO: {} trozo(s) → {}", trozos.len(), salida.display()));
+                    diario(&format!("EL OÍDO: {} trozo(s) · {} palabra(s) → {}",
+                                    trozos.len(), palabras.len(), salida.display()));
                     let ruta_s = salida.to_string_lossy().to_string();
                     set_render(move |s| {
                         s.state = "done".into();
@@ -2621,7 +2629,8 @@ pub fn cli(args: &[String]) -> i32 {
                         s.out = ruta_s.clone();
                     });
                     println!("{}", serde_json::json!({"state": "done",
-                        "out": salida.to_string_lossy(), "trozos": trozos.len()}));
+                        "out": salida.to_string_lossy(), "trozos": trozos.len(),
+                        "palabras": palabras.len()}));
                     0
                 }
                 Err(e) => {

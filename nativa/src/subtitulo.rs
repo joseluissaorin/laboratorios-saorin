@@ -28,6 +28,102 @@ impl Sub {
     pub fn dur(&self) -> f64 { (self.t1 - self.t0).max(0.05) }
 }
 
+/// UNA PALABRA con su entrada y su salida, en segundos DE LA BOBINA.
+///
+/// Es la unidad de verdad del pie: un subtítulo no es más que un puñado de
+/// palabras agrupadas con un criterio, y del criterio se cambia de opinión.
+/// Guardando las palabras, cambiar cuántas letras caben o partir un pie por
+/// la mitad es instantáneo y no vuelve a tocar el modelo.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Palabra {
+    pub t0: f64,
+    pub t1: f64,
+    pub txt: String,
+    /// aquí empezaba un tramo del modelo: es una PISTA de dónde rompe la
+    /// frase, y sabe cosas que un contador de letras no sabe
+    pub corte: bool,
+}
+
+/// LOS TOPES DEL OFICIO. No son gustos: son lo que se lee y lo que no.
+pub const MAX_LINEAS: usize = 2;      // tres renglones tapan el plano
+pub const MAX_DUR: f64 = 7.0;         // más es un cartel, no un subtítulo
+pub const MIN_DUR: f64 = 1.0;         // menos no da tiempo ni a mirarlo
+/// una pausa así de larga entre dos palabras es un punto y aparte, aunque
+/// nadie haya dicho «punto»
+pub const PAUSA: f64 = 0.6;
+
+/// ARMAR LOS SUBTÍTULOS A PARTIR DE LAS PALABRAS.
+///
+/// Aquí es donde un montón de palabras se vuelve un pie legible, y por eso
+/// está en la app y no en el oído: se ejecuta cada vez que el autor cambia
+/// de idea sobre cuántas letras quiere, y tarda lo que tarda recorrer una
+/// lista.
+///
+/// Corta —por este orden— donde hay **punto**, donde hay una **pausa**
+/// larga, donde ya no cabe en DOS renglones, y donde el pie llevaría
+/// demasiado tiempo en pantalla. Nunca parte una palabra.
+pub fn arma(palabras: &[Palabra], ancho: usize) -> Vec<Sub> {
+    let cabe = (ancho * MAX_LINEAS).max(8);
+    let mut fuera: Vec<Sub> = Vec::new();
+    let mut actual: Vec<&Palabra> = Vec::new();
+
+    let cierra = |v: &Vec<&Palabra>, fuera: &mut Vec<Sub>| {
+        if v.is_empty() { return; }
+        let texto = v.iter().map(|w| w.txt.as_str()).collect::<Vec<_>>().join(" ");
+        fuera.push(Sub { t0: v[0].t0, t1: v[v.len() - 1].t1.max(v[0].t0 + 0.2), texto });
+    };
+
+    for w in palabras {
+        if w.txt.trim().is_empty() { continue; }
+        if let Some(&ult) = actual.last() {
+            let largo = actual.iter().map(|x| x.txt.chars().count() + 1).sum::<usize>()
+                + w.txt.chars().count();
+            let dur = w.t1 - actual[0].t0;
+            let punto = ult.txt.ends_with(['.', '?', '!', '…'])
+                || ult.txt.ends_with("?»") || ult.txt.ends_with(".»");
+            let pausa = w.t0 - ult.t1 >= PAUSA;
+            // LA PISTA DEL MODELO MANDA, y manda mucho: un subtítulo sigue al
+            // HABLA, no al contador de letras. Sólo se ignora cuando lo que
+            // llevamos es un fragmento (un «Sí», un «Es claro»), que se pega
+            // al siguiente en vez de parpadear solo.
+            //
+            // Medido sobre los mismos 20 s: con el umbral en 0,6 del ancho
+            // salían 15 pies de hasta 77 letras y 5,4 s, y uno juntaba dos
+            // frases distintas; con el fragmento en 12 letras salen 17 de
+            // hasta 74 y 3,6 s, y cada frase va en el suyo.
+            const FRAGMENTO: usize = 12;
+            let hecho: usize = actual.iter().map(|x| x.txt.chars().count() + 1).sum();
+            let sugerido = w.corte && hecho >= FRAGMENTO;
+            if punto || pausa || sugerido || largo > cabe || dur > MAX_DUR {
+                cierra(&actual, &mut fuera);
+                actual.clear();
+            }
+        }
+        actual.push(w);
+    }
+    cierra(&actual, &mut fuera);
+
+    // los topes de tiempo, al final y en este orden: primero se recorta lo
+    // que dura de más y luego se estira lo que dura de menos, sin pisar al
+    // siguiente (un pie encima de otro es peor que uno corto)
+    for s in fuera.iter_mut() {
+        if s.t1 - s.t0 > MAX_DUR { s.t1 = s.t0 + MAX_DUR; }
+    }
+    for i in 0..fuera.len() {
+        if fuera[i].t1 - fuera[i].t0 >= MIN_DUR { continue; }
+        let tope = fuera.get(i + 1).map(|x| x.t0 - 0.04).unwrap_or(f64::MAX);
+        fuera[i].t1 = (fuera[i].t0 + MIN_DUR).min(tope).max(fuera[i].t1);
+    }
+    fuera
+}
+
+/// LAS PALABRAS DE UN TRAMO, para partir un pie sin perderle el tiempo
+pub fn palabras_entre(palabras: &[Palabra], t0: f64, t1: f64) -> Vec<Palabra> {
+    palabras.iter()
+        .filter(|w| w.t1 > t0 + 1e-6 && w.t0 < t1 - 1e-6)
+        .cloned().collect()
+}
+
 /// LA LETRA: las familias que trae el taller, cada una con su NEGRITA de
 /// verdad cuando la hay. Donde no la hay se engorda el trazo (§rasteriza),
 /// que es lo que hace un cajista cuando no tiene la fundición completa.
@@ -208,15 +304,10 @@ pub fn parte(texto: &str, ancho: usize) -> Vec<String> {
         if mal < mejor.0 { mejor = (mal, k); }
     }
     let (izq, der) = (palabras[..mejor.1].join(" "), palabras[mejor.1..].join(" "));
-    if der.chars().count() > ancho {
-        // tres líneas o más: se sigue partiendo, pero eso ya es un subtítulo
-        // demasiado largo y el autor debería cortarlo
-        let mut v = vec![izq];
-        v.extend(parte(&der, ancho));
-        v
-    } else {
-        vec![izq, der]
-    }
+    // DOS RENGLONES Y NO MÁS: tres tapan el plano y es lo que hace que un
+    // subtítulo parezca un párrafo. Si no cabe, es que el pie está mal
+    // cortado — y eso lo arregla `arma`, no el que dibuja.
+    vec![izq, der]
 }
 
 /// EL PIE RASTERIZADO: PNG con alfa, recortado al texto.
@@ -523,16 +614,97 @@ mod pruebas {
         assert!(d < 10, "desequilibrio {d}: {v:?}");
     }
 
-    /// más de dos líneas es mal subtítulo, pero si el autor lo escribe hay
-    /// que repartirlo bien igualmente — nunca cortando una palabra
+    /// NUNCA tres renglones: es lo que hace que un pie parezca un párrafo
     #[test]
-    fn tres_lineas_tambien_se_reparten() {
-        let frase = "esto es una frase bastante larga que no cabe en una sola línea";
-        let v = parte(frase, 30);
-        assert!(v.len() >= 3, "{v:?}");
-        assert!(v.iter().all(|l| l.chars().count() <= 30), "{v:?}");
-        assert_eq!(v.join(" ").split_whitespace().count(),
-                   frase.split_whitespace().count());
+    fn jamas_pasa_de_dos_renglones() {
+        for ancho in [20, 30, 42] {
+            let v = parte("esto es una frase bastante larga que no cabe en una sola línea",
+                          ancho);
+            assert!(v.len() <= MAX_LINEAS, "{ancho}: {v:?}");
+        }
+    }
+
+    fn w(t0: f64, t1: f64, txt: &str) -> Palabra {
+        Palabra { t0, t1, txt: txt.into(), corte: false }
+    }
+
+    /// el armador corta por PUNTO aunque quepa de sobra
+    #[test]
+    fn corta_donde_hay_punto() {
+        let p = vec![w(0.0, 0.3, "Hola."), w(0.35, 0.7, "Qué"), w(0.7, 1.0, "tal")];
+        let v = arma(&p, 42);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].texto, "Hola.");
+        assert_eq!(v[1].texto, "Qué tal");
+    }
+
+    /// y por PAUSA, aunque nadie haya dicho «punto»
+    #[test]
+    fn corta_donde_hay_silencio() {
+        let p = vec![w(0.0, 0.3, "uno"), w(0.35, 0.7, "dos"),
+                     w(3.0, 3.4, "tres")];   // hueco de 2,3 s
+        let v = arma(&p, 42);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].texto, "uno dos");
+    }
+
+    /// y nunca deja un pie que no quepa en dos renglones
+    #[test]
+    fn ningun_pie_se_pasa_de_dos_renglones() {
+        let mut p = Vec::new();
+        let mut t = 0.0;
+        for i in 0..60 {
+            p.push(w(t, t + 0.25, &format!("palabra{i}")));
+            t += 0.3;   // sin pausas: obliga a cortar por LARGO
+        }
+        for ancho in [20usize, 32, 42] {
+            let v = arma(&p, ancho);
+            assert!(!v.is_empty());
+            for s in &v {
+                assert!(parte(&s.texto, ancho).len() <= MAX_LINEAS,
+                        "ancho {ancho}: «{}»", s.texto);
+                assert!(s.texto.chars().count() <= ancho * MAX_LINEAS,
+                        "ancho {ancho}: «{}» ({} letras)", s.texto,
+                        s.texto.chars().count());
+                assert!(s.dur() <= MAX_DUR + 1e-6, "dura {:.2}", s.dur());
+            }
+            // y ninguno pisa al siguiente
+            for k in 1..v.len() {
+                assert!(v[k - 1].t1 <= v[k].t0 + 1e-6, "solape en {k}");
+            }
+        }
+    }
+
+    /// la pista del modelo corta… pero deja juntar si el pie va corto
+    #[test]
+    fn la_pista_del_modelo_corta_pero_no_ata() {
+        let mut p = vec![w(0.0, 0.4, "una"), w(0.4, 0.8, "frase"), w(0.8, 1.2, "larga"),
+                         w(1.2, 1.6, "de"), w(1.6, 2.0, "prueba"),
+                         w(2.0, 2.4, "otra"), w(2.4, 2.8, "más")];
+        p[5].corte = true;              // el modelo rompía aquí
+        // lo de delante tiene cuerpo: se corta, quepa lo que quepa
+        assert_eq!(arma(&p, 20).len(), 2);
+        assert_eq!(arma(&p, 60).len(), 2);
+        // pero un FRAGMENTO no se queda solo parpadeando
+        let mut q = vec![w(0.0, 0.4, "Sí"), w(0.4, 0.9, "claro"), w(0.9, 1.4, "que")];
+        q[1].corte = true;
+        assert_eq!(arma(&q, 40).len(), 1, "«Sí» no debe quedarse solo");
+    }
+
+    /// RECOMPONER: el mismo material con otro ancho da otros cortes, y no
+    /// se pierde ni una palabra por el camino
+    #[test]
+    fn recomponer_no_pierde_palabras() {
+        let mut p = Vec::new();
+        let mut t = 0.0;
+        for i in 0..40 { p.push(w(t, t + 0.25, &format!("pal{i}"))); t += 0.3; }
+        let cuenta = |v: &Vec<Sub>| v.iter()
+            .map(|s| s.texto.split_whitespace().count()).sum::<usize>();
+        let a = arma(&p, 20);
+        let b = arma(&p, 42);
+        assert_eq!(cuenta(&a), 40);
+        assert_eq!(cuenta(&b), 40);
+        assert!(a.len() > b.len(), "con menos letras tienen que salir MÁS pies");
     }
 
     #[test]

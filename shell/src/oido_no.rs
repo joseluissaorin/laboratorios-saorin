@@ -16,10 +16,12 @@ const SIN: &str = "este taller se compiló sin el oído (falta LLVM/libclang \
 pub fn modelo(_taller: &Path, _cual: usize, _aviso: &dyn Fn(&str)) -> Result<PathBuf, String> {
     Err(SIN.into())
 }
-pub fn escucha(_m: &Path, _ff: &str, _media: &Path, _idioma: &str,
-               _largo: i32, _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
-pub fn escucha_bobina(_m: &Path, _ff: &str, _t: &[Trabajo], _idioma: &str,
-                      _largo: i32, _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
+pub struct Palabra { pub t0: f64, pub t1: f64, pub txt: String, pub corte: bool }
+pub fn palabras_json(_p: &[Palabra]) -> String { "{\"palabras\":[]}".into() }
+pub fn escucha(_m: &Path, _ff: &str, _media: &Path, _idioma: &str, _largo: i32,
+               _aviso: &dyn Fn(&str)) -> Result<(Vec<Trozo>, Vec<Palabra>), String> { Err(SIN.into()) }
+pub fn escucha_bobina(_m: &Path, _ff: &str, _t: &[Trabajo], _idioma: &str, _largo: i32,
+                      _aviso: &dyn Fn(&str)) -> Result<(Vec<Trozo>, Vec<Palabra>), String> { Err(SIN.into()) }
 pub const LARGO_PIE: i32 = 84;
 pub fn srt(_t: &[Trozo]) -> String { String::new() }
 pub fn el_de_esta_maquina() -> usize { 0 }

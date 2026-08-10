@@ -207,6 +207,10 @@ pub struct Proyecto {
     pub subbobinas: std::collections::HashMap<String, SubBobina>,
     /// EL PIE: la pista de subtítulos y el estilo de toda ella
     pub subs: Vec<crate::subtitulo::Sub>,
+    /// LAS PALABRAS con sus tiempos, tal cual las oyó el modelo. De aquí
+    /// salen los subtítulos, y por eso se guardan: cambiar cuántas letras
+    /// caben recompone la pista entera sin volver a escuchar nada.
+    pub palabras: Vec<crate::subtitulo::Palabra>,
     pub estilo_sub: crate::subtitulo::Estilo,
     /// los subtítulos YA VUELTOS CAPAS (rasterizados): la caché que leen la
     /// preview y el payload. Se rehace al tocar el texto o el estilo.
@@ -1185,6 +1189,10 @@ impl Proyecto {
         v["subs"] = serde_json::json!(self.subs.iter().map(|x| {
             serde_json::json!({"t0": x.t0, "t1": x.t1, "texto": x.texto})
         }).collect::<Vec<_>>());
+        // las palabras van en una línea por barata: son muchas y no se leen
+        v["palabras"] = serde_json::json!(self.palabras.iter().map(|w| {
+            serde_json::json!({"t": w.t0, "h": w.t1, "c": w.corte, "p": w.txt})
+        }).collect::<Vec<_>>());
         v["estilo_sub"] = self.estilo_sub.json();
         v["markers"] = serde_json::json!(self.marcas.iter().map(|m| {
             serde_json::json!({"t": m.t, "nota": m.nota, "color": m.color})
@@ -1318,6 +1326,15 @@ impl Proyecto {
                 })
             }).collect();
         subs.sort_by(|a, b| a.t0.partial_cmp(&b.t0).unwrap_or(std::cmp::Ordering::Equal));
+        let palabras: Vec<crate::subtitulo::Palabra> = v["palabras"].as_array()
+            .cloned().unwrap_or_default().iter().filter_map(|w| {
+                let t0 = w["t"].as_f64()?;
+                Some(crate::subtitulo::Palabra {
+                    t0, t1: w["h"].as_f64().unwrap_or(t0 + 0.2),
+                    txt: w["p"].as_str().unwrap_or("").to_string(),
+                    corte: w["c"].as_bool().unwrap_or(false),
+                })
+            }).collect();
         let estilo_sub = crate::subtitulo::Estilo::de_json(&v["estilo_sub"]);
         let rango = match (v["range"]["in"].as_f64(), v["range"]["out"].as_f64()) {
             (Some(a), Some(b)) if b > a + 0.01 => Some((a, b)),
@@ -1351,6 +1368,7 @@ impl Proyecto {
             capas,
             subbobinas,
             subs,
+            palabras,
             estilo_sub,
             pie: Vec::new(),
             mudo_voz: v["mudo"]["voz"].as_bool().unwrap_or(false),

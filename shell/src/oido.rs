@@ -33,6 +33,23 @@ pub fn el_de_esta_maquina() -> usize {
     if hay_gpu() { 1 } else { 0 }
 }
 
+/// EL PRESET DE DTW QUE LE CORRESPONDE A CADA MODELO.
+///
+/// Los sellos por token de whisper son groseros: caen en los bordes del
+/// tramo, no en la palabra (se veía clarísimo — todo a segundos redondos).
+/// Los buenos salen de **alinear por DTW** los mapas de atención, y para eso
+/// hay que decirle a whisper.cpp QUÉ cabezas mirar, que depende del modelo.
+fn preset_dtw(modelo: &Path) -> whisper_rs::DtwModelPreset {
+    use whisper_rs::DtwModelPreset::*;
+    let n = modelo.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    if n.contains("turbo") { LargeV3Turbo }
+    else if n.contains("large") { LargeV3 }
+    else if n.contains("medium") { Medium }
+    else if n.contains("base") { Base }
+    else if n.contains("tiny") { Tiny }
+    else { Small }
+}
+
 fn nombre_modelo(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or("modelo.bin")
 }
@@ -88,6 +105,26 @@ pub struct Trozo {
     pub t0: f64,
     pub t1: f64,
     pub texto: String,
+}
+
+/// UNA PALABRA con su segundo de entrada y de salida.
+///
+/// **Es la unidad de verdad del pie.** Un subtítulo es un montón de palabras
+/// agrupadas con un criterio (tantas letras, tantos segundos, dónde cae la
+/// puntuación) — y ese criterio se cambia de opinión. Si el oído sólo
+/// devolviera frases ya cortadas, cambiar de idea obligaría a transcribir
+/// otra vez; con las palabras, recomponer la pista entera es instantáneo y
+/// pasa en la app, sin volver a tocar el modelo.
+pub struct Palabra {
+    pub t0: f64,
+    pub t1: f64,
+    pub txt: String,
+    /// EMPIEZA UN TRAMO DE WHISPER. No es un capricho: whisper ya ha decidido
+    /// dónde le parece que rompe la frase, y esa decisión sabe cosas que un
+    /// contador de letras no sabe. El armador la usa como PISTA —corta ahí si
+    /// el pie ya tiene cuerpo— y así puede partir más fino o juntar más,
+    /// según lo que pida el autor.
+    pub corte: bool,
 }
 
 /// UN PLANO QUE ESCUCHAR: qué fichero, qué trozo, dónde cae en la bobina y a
@@ -172,6 +209,46 @@ pub fn hay_gpu() -> bool {
 /// más no da tiempo a leerlo y menos parte las frases donde no toca.
 pub const LARGO_PIE: i32 = 84;
 
+/// LAS PALABRAS DE UN TRAMO, sacadas de los tokens.
+///
+/// whisper no da palabras: da **tokens**, que son trozos de palabra. La
+/// pista de dónde empieza una palabra es el ESPACIO INICIAL (la misma
+/// trampa que ya estaba documentada para parakeet). Y hay que tirar los
+/// tokens especiales —los `[_BEG_]` y los `<|...|>`— o se cuelan en el texto.
+fn palabras_de(seg: &whisper_rs::WhisperSegment, desfase: f64, v: f64) -> Vec<Palabra> {
+    let mut fuera: Vec<Palabra> = Vec::new();
+    // la primera de un tramo lleva la marca (se pone al salir)
+    for k in 0..seg.n_tokens() {
+        let Some(tok) = seg.get_token(k) else { continue };
+        let Ok(t) = tok.to_str_lossy() else { continue };
+        if t.starts_with("[_") || t.contains("<|") { continue; }
+        if t.trim().is_empty() { continue; }
+        let d = tok.token_data();
+        // EL SELLO DE DTW MANDA si lo hay (-1 = no lo hay): es el que cae en
+        // la palabra. `t0`/`t1` sin DTW caen en los bordes del tramo.
+        let (mut c0, c1) = (d.t0 as f64, d.t1 as f64);
+        if d.t_dtw >= 0 { c0 = d.t_dtw as f64; }
+        let (a, b) = (desfase + c0 / 100.0 / v,
+                      desfase + c1.max(c0 + 2.0) / 100.0 / v);
+        // ¿palabra nueva? el espacio inicial lo dice. La puntuación se pega a
+        // la de antes, que es donde va.
+        let nueva = t.starts_with(' ') || fuera.is_empty();
+        let solo_signo = t.trim().chars().all(|c| !c.is_alphanumeric());
+        match fuera.last_mut() {
+            Some(w) if !nueva || solo_signo => {
+                w.txt.push_str(t.trim_start_matches(' '));
+                w.t1 = w.t1.max(b);
+            }
+            _ => fuera.push(Palabra {
+                t0: a.max(0.0), t1: b.max(a + 0.02),
+                txt: t.trim().to_string(),
+                corte: fuera.is_empty(),
+            }),
+        }
+    }
+    fuera
+}
+
 /// LO QUE HACE QUE UN SUBTÍTULO SEA UN SUBTÍTULO y no un párrafo.
 ///
 /// whisper devuelve por defecto **tramos de hasta treinta segundos**: un
@@ -216,7 +293,8 @@ fn estira_los_cortos(trozos: &mut [Trozo]) {
 
 /// TRANSCRIBIR. `idioma` vacío = que lo detecte él.
 pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
-               largo: i32, aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
+               largo: i32, aviso: &dyn Fn(&str))
+               -> Result<(Vec<Trozo>, Vec<Palabra>), String> {
     use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     let pcm = pcm16k(ffmpeg, media)?;
     let segundos = pcm.len() as f64 / 16000.0;
@@ -224,8 +302,12 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
                    modelo.file_name().unwrap_or_default().to_string_lossy()));
 
     whisper_rs::install_logging_hooks();
-    let ctx = WhisperContext::new_with_params(
-        modelo, WhisperContextParameters::default())
+    let mut cp = WhisperContextParameters::default();
+    cp.dtw_parameters(whisper_rs::DtwParameters {
+        mode: whisper_rs::DtwMode::ModelPreset { model_preset: preset_dtw(modelo) },
+        dtw_mem_size: 1024 * 1024 * 128,
+    });
+    let ctx = WhisperContext::new_with_params(modelo, cp)
         .map_err(|e| format!("no pude abrir el modelo: {e}"))?;
     let mut est = ctx.create_state().map_err(|e| format!("whisper: {e}"))?;
 
@@ -249,6 +331,7 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
     let t0 = std::time::Instant::now();
     est.full(p, &pcm).map_err(|e| format!("transcribiendo: {e}"))?;
     let mut trozos: Vec<Trozo> = Vec::new();
+    let mut palabras: Vec<Palabra> = Vec::new();
     for seg in est.as_iter() {
         let texto = seg.to_str_lossy().unwrap_or_default().to_string();
         let t = texto.trim();
@@ -257,26 +340,34 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
         let a = seg.start_timestamp() as f64 / 100.0;
         let b = seg.end_timestamp() as f64 / 100.0;
         trozos.push(Trozo { t0: a, t1: b.max(a + 0.2), texto: t.to_string() });
+        palabras.extend(palabras_de(&seg, 0.0, 1.0));
     }
     recorta_los_largos(&mut trozos);
     estira_los_cortos(&mut trozos);
+    cierra_huecos(&mut palabras);
     let el = t0.elapsed().as_secs_f64();
-    aviso(&format!("{} trozo(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
-                   trozos.len(), el, segundos / el.max(0.001)));
-    Ok(trozos)
+    aviso(&format!("{} trozo(s) · {} palabra(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
+                   trozos.len(), palabras.len(), el, segundos / el.max(0.001)));
+    Ok((trozos, palabras))
 }
 
 /// ESCUCHAR LA BOBINA ENTERA: todos los planos con una sola carga del modelo
 /// (que es lo caro) y los tiempos ya puestos en la línea de tiempo.
 pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma: &str,
-                      largo: i32, aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
+                      largo: i32, aviso: &dyn Fn(&str))
+                      -> Result<(Vec<Trozo>, Vec<Palabra>), String> {
     use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     whisper_rs::install_logging_hooks();
-    let ctx = WhisperContext::new_with_params(
-        modelo, WhisperContextParameters::default())
+    let mut cp = WhisperContextParameters::default();
+    cp.dtw_parameters(whisper_rs::DtwParameters {
+        mode: whisper_rs::DtwMode::ModelPreset { model_preset: preset_dtw(modelo) },
+        dtw_mem_size: 1024 * 1024 * 128,
+    });
+    let ctx = WhisperContext::new_with_params(modelo, cp)
         .map_err(|e| format!("no pude abrir el modelo: {e}"))?;
     let hilos = cuantos_hilos();
     let mut todos: Vec<Trozo> = Vec::new();
+    let mut palabras: Vec<Palabra> = Vec::new();
     let t00 = std::time::Instant::now();
     let mut total_s = 0.0f64;
     for (k, t) in trabajos.iter().enumerate() {
@@ -312,15 +403,50 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
             let a = t.desde + seg.start_timestamp() as f64 / 100.0 / v;
             let b = t.desde + seg.end_timestamp() as f64 / 100.0 / v;
             todos.push(Trozo { t0: a, t1: b.max(a + 0.25), texto: x.to_string() });
+            palabras.extend(palabras_de(&seg, t.desde, v));
         }
     }
     todos.sort_by(|a, b| a.t0.partial_cmp(&b.t0).unwrap_or(std::cmp::Ordering::Equal));
     recorta_los_largos(&mut todos);
     estira_los_cortos(&mut todos);
+    palabras.sort_by(|a, b| a.t0.partial_cmp(&b.t0).unwrap_or(std::cmp::Ordering::Equal));
+    cierra_huecos(&mut palabras);
     let el = t00.elapsed().as_secs_f64();
-    aviso(&format!("{} trozo(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
-                   todos.len(), el, total_s / el.max(0.001)));
-    Ok(todos)
+    aviso(&format!("{} trozo(s) · {} palabra(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
+                   todos.len(), palabras.len(), el, total_s / el.max(0.001)));
+    Ok((todos, palabras))
+}
+
+/// CERRAR LOS HUECOS PEQUEÑOS entre palabras.
+///
+/// DTW da un INSTANTE por palabra, no un tramo: el `t1` que devuelve es casi
+/// el mismo `t0`. Para que el final de un subtítulo caiga donde de verdad
+/// acaba la frase, cada palabra se estira hasta que empieza la siguiente
+/// —pero sólo si están pegadas—. Un silencio de verdad se queda como está,
+/// que es justo lo que el armador usa para cortar.
+pub fn cierra_huecos(p: &mut [Palabra]) {
+    for i in 0..p.len() {
+        let sig = p.get(i + 1).map(|w| w.t0);
+        let fin = match sig {
+            Some(s) if s - p[i].t0 <= 1.2 => s,
+            _ => p[i].t1.max(p[i].t0 + 0.25),
+        };
+        p[i].t1 = fin.max(p[i].t0 + 0.05);
+    }
+}
+
+/// LAS PALABRAS EN JSON, que es lo que lee la app para poder recomponer los
+/// subtítulos sin volver a escuchar nada.
+pub fn palabras_json(p: &[Palabra]) -> String {
+    let mut o = String::from("{\"palabras\":[");
+    for (i, w) in p.iter().enumerate() {
+        if i > 0 { o.push(','); }
+        let _ = write!(o, "{{\"t\":{:.3},\"h\":{:.3},\"c\":{},\"p\":{}}}",
+                       w.t0, w.t1, w.corte,
+                       serde_json::Value::String(w.txt.clone()));
+    }
+    o.push_str("]}");
+    o
 }
 
 /// EL .srt, que es el formato que entiende todo el mundo (y el que lee la app)

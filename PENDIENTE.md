@@ -213,6 +213,46 @@ y los dos motores lo dibujan sin saber qué es un subtítulo, y salen idénticos
 El PNG va recortado al texto (un lienzo entero por línea serían 8 MB de
 textura cada uno).
 
+### La tercera vuelta del pie: PALABRA A PALABRA
+
+✅ **Seguían saliendo párrafos.** El corte lo hacía whisper y la app se lo
+comía tal cual, así que si el corte era malo no había nada que hacer. Ahora
+el oído devuelve **las palabras con su segundo**, y el que arma los
+subtítulos es la app (`subtitulo::arma`).
+
+Dos cosas hicieron falta para que los tiempos por palabra fueran de verdad:
+
+- **DTW** (`dtw_parameters`, con el preset del modelo). Sin él, los sellos
+  por token caen en los bordes del tramo y no en la palabra — se veía a la
+  legua: todo a segundos redondos. Con él, «Todavía» va de 0,12 a 0,45.
+- **cerrar los huecos pequeños**: DTW da un INSTANTE por palabra, no un
+  tramo, así que cada palabra se estira hasta la siguiente… salvo que haya
+  un silencio de verdad, que es justo lo que se usa para cortar.
+
+Y el armador corta —por este orden— donde hay **punto**, donde hay una
+**pausa** de 0,6 s, donde **el modelo rompía** (esa pista sabe cosas que un
+contador de letras no sabe), donde ya no cabe en **dos renglones** y donde el
+pie llevaría más de **siete segundos**. Nunca parte una palabra y **nunca
+saca tres renglones**. Medido sobre los mismos 20 s: 17 pies de ≤74 letras y
+≤3,6 s, con cada frase en el suyo. Con el umbral anterior salían 15 de hasta
+77 letras y 5,4 s, y uno juntaba dos frases distintas.
+
+✅ **Cambiar de idea es gratis.** Las palabras se guardan en la bobina, así
+que elegir otro ancho **recompone la pista entera** al instante y sin volver
+a escuchar: 28 letras → 18 pies, 52 → 17. Comprobado por la interfaz.
+
+✅ **La ventana del oído, con mandos de verdad.** El primitivo que faltaba es
+`mandos.rs`: un **desplegable** que abre la lista entera (se ve lo que hay y
+se va directo, en vez de ciclar a ciegas) y una **regla de dos tiradores**
+para el trozo, porque un rango se elige arrastrando, no escribiendo dos
+números. La lengua, el sonido, el modelo y las letras por renglón son ahora
+listas. Con una lista abierta lo demás **no se dibuja**: en este taller el
+texto va siempre por encima de los rectángulos, así que lo que se tapa es lo
+que no se pinta (la lección de la ficha de la música, otra vez).
+
+✅ **Y la ventana se cierra sola** cuando el oído termina. Antes había que
+adivinar si había acabado y cerrarla a mano.
+
 ### La segunda vuelta del pie (lo que se vio usándolo)
 
 ✅ **Salían párrafos, no subtítulos.** Era lo más grave: whisper devuelve
