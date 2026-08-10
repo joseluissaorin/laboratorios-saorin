@@ -213,6 +213,27 @@ y los dos motores lo dibujan sin saber qué es un subtítulo, y salen idénticos
 El PNG va recortado al texto (un lienzo entero por línea serían 8 MB de
 textura cada uno).
 
+### Lo que costó llevarlo a Windows (para no repetirlo)
+
+Tres trampas, ninguna del código del pie:
+
+1. **`whisper-rs-sys` genera sus enlaces con bindgen, que pide libclang.** El
+   GPD no tenía LLVM y eso tumbaba el shell ENTERO —revelado incluido— por
+   una función que igual no se usa. Se instaló LLVM (winget) *y* el oído pasó
+   a ser una bandera de compilación (`--no-default-features` deja el taller
+   entero funcionando y los subtítulos avisan de que no están).
+2. **`tauri-build` 2.6 no encuentra el `cargo:dev` de `tauri` 2.11 en
+   Windows.** El shell usaba tauri sólo para la ventana del estudio viejo,
+   que el editor nativo sustituyó. Ahora es la bandera `ventana` (encendida
+   por defecto) y el GPD compila sin ella.
+3. **Un `[features]` mal colocado partió la lista de dependencias**: tauri,
+   tiny_http, rust-embed, serde_json y percent-encoding quedaron dentro del
+   bloque `[target.'cfg(target_os = "macos")'.dependencies]`. En el Mac
+   seguían resolviéndose y en Windows desaparecieron las cinco — 136 errores
+   de importación en un crate intacto. **Un fallo que sólo se ve en la otra
+   máquina es el más caro de todos**; por eso ahora winlab se comprueba en
+   cruzado desde el Mac (`cargo check --target x86_64-pc-windows-msvc`).
+
 ## Lo único que sigue pendiente
 
 ▢ **Windows, recompilar y ver.** Todo lo de arriba está hecho y visto en el
