@@ -6937,11 +6937,16 @@ impl Estado {
         if self.revelando.is_some() { self.di("espera a que acabe el revelado"); return; }
         let inicios = pr.inicios();
         let trabajos: Vec<serde_json::Value> = pr.clips.iter().enumerate()
-            .filter(|(_, c)| !c.hueco && !c.mute && !c.ausente && c.anidada.is_none())
+            // marcha atrás y congelado se quedan fuera: al revés no hay habla
+            // que transcribir, y congelado no suena
+            .filter(|(_, c)| !c.hueco && !c.mute && !c.ausente && c.anidada.is_none()
+                    && c.speed > 0.02)
             .map(|(i, c)| serde_json::json!({
                 "file": c.media,
                 "in": c.t_in, "out": c.t_out,
-                "desde": inicios.get(i).copied().unwrap_or(0.0),
+                // el desfase del sonido cuenta: si la voz va corrida, el pie
+                // tiene que ir corrido con ella
+                "desde": inicios.get(i).copied().unwrap_or(0.0) + c.desfase,
                 "speed": c.speed,
             })).collect();
         if trabajos.is_empty() {
