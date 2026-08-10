@@ -127,6 +127,15 @@ fn pcm16k_trozo(ffmpeg: &str, media: &Path, desde: f64, dur: f64)
         .collect())
 }
 
+/// CUÁNTOS HILOS. ggml quiere **núcleos físicos**, no hilos lógicos: con SMT
+/// los dos hermanos se pelean por la misma unidad vectorial y la cuenta va más
+/// lenta que con la mitad. `available_parallelism` cuenta los lógicos, así
+/// que en x86 se parte por dos.
+fn cuantos_hilos() -> usize {
+    let logicos = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    if cfg!(target_arch = "x86_64") { (logicos / 2).clamp(1, 12) } else { logicos.min(12) }
+}
+
 /// CÓMO SE BUSCA LA FRASE, según quién trabaje.
 ///
 /// Con **Metal** (el Mac) el haz de cinco sale casi gratis —21× tiempo real
@@ -164,9 +173,8 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
     p.set_print_progress(false);
     p.set_print_realtime(false);
     p.set_print_timestamps(false);
-    // TODOS LOS NÚCLEOS: en el HX 370 son doce, y ggml escala con ellos.
-    let hilos = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    p.set_n_threads(hilos.min(16) as i32);
+    let hilos = cuantos_hilos();
+    p.set_n_threads(hilos as i32);
     // que no se invente frases en los silencios (la plaga de whisper)
     p.set_no_speech_thold(0.6);
     p.set_suppress_blank(true);
@@ -198,7 +206,7 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
     let ctx = WhisperContext::new_with_params(
         modelo, WhisperContextParameters::default())
         .map_err(|e| format!("no pude abrir el modelo: {e}"))?;
-    let hilos = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let hilos = cuantos_hilos();
     let mut todos: Vec<Trozo> = Vec::new();
     let t00 = std::time::Instant::now();
     let mut total_s = 0.0f64;
@@ -220,7 +228,7 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
         p.set_print_progress(false);
         p.set_print_realtime(false);
         p.set_print_timestamps(false);
-        p.set_n_threads(hilos.min(16) as i32);
+        p.set_n_threads(hilos as i32);
         p.set_no_speech_thold(0.6);
         p.set_suppress_blank(true);
         est.full(p, &pcm).map_err(|e| format!("transcribiendo: {e}"))?;
