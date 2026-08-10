@@ -2594,10 +2594,13 @@ pub fn cli(args: &[String]) -> i32 {
             let r = crate::oido::modelo(&taller, cual, &aviso)
                 .and_then(|m| {
                     set_render(|s| { s.pct = 0.25; s.step = "el oído: escuchando".into(); });
+                    let largo = arg("--largo").and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(crate::oido::LARGO_PIE);
                     if lista.is_empty() {
-                        crate::oido::escucha(&m, &ffbin("ffmpeg"), &ruta, &idioma, &aviso)
+                        crate::oido::escucha(&m, &ffbin("ffmpeg"), &ruta, &idioma, largo, &aviso)
                     } else {
-                        crate::oido::escucha_bobina(&m, &ffbin("ffmpeg"), &lista, &idioma, &aviso)
+                        crate::oido::escucha_bobina(&m, &ffbin("ffmpeg"), &lista, &idioma,
+                                                    largo, &aviso)
                     }
                 });
             match r {

@@ -213,6 +213,34 @@ y los dos motores lo dibujan sin saber qué es un subtítulo, y salen idénticos
 El PNG va recortado al texto (un lienzo entero por línea serían 8 MB de
 textura cada uno).
 
+### La segunda vuelta del pie (lo que se vio usándolo)
+
+✅ **Salían párrafos, no subtítulos.** Era lo más grave: whisper devuelve
+tramos de hasta treinta segundos y aparecía un muro de texto de golpe.
+whisper.cpp sabe partirlo, pero hay que pedírselo con **tres cosas a la vez**
+—tiempos POR TOKEN, largo máximo y cortar POR PALABRA— y ninguna estaba
+puesta. Ahora el largo va atado al ancho de línea del estilo (dos renglones
+exactos) y encima hay dos topes de tiempo que el largo en caracteres no
+detecta: **mínimo un segundo** (medio segundo no da tiempo ni a mirarlo) y
+**máximo siete** (whisper le cuelga a veces a un tramo corto el silencio que
+viene detrás, y el pie se quedaba doce segundos en pantalla). Medido sobre
+20 s de habla: 20 cues, ≤80 caracteres, ≤4,8 s, sin un solo solape.
+
+✅ **El color, libre; negrita y cursiva.** El color era una lista de cuatro y
+ahora son tres números (con los seis de la casa como atajos y la muestra al
+lado, que un nombre no dice qué color es). La negrita usa la **fundición de
+verdad** cuando la familia la tiene —Space Grotesk trae su negra— y engorda
+el trazo cuando no; la cursiva inclina 12° con el eje en la línea base de
+cada renglón, no en el borde del lienzo: si no, el bloque se abre en abanico.
+
+✅ **La ventana del oído.** «Subtítulos automáticos» tenía que preguntar y no
+preguntaba. Ahora abre su ventana: la lengua, qué trozo (toda la bobina o
+sólo el rango), de qué sonido (los planos o una pista de música — que es
+donde cae una voz en off desacoplada), el modelo, y una **barra que avanza
+por planos** con lo que está haciendo y cuánto lleva. De paso: `curl` escribía
+su medidor a stderr y el taller lo leía como si fueran pasos suyos («0 0 0
+--:--:--» donde debía decir qué hacía).
+
 ### Lo medido en las dos máquinas (y lo que queda por hacer)
 
 | máquina | modelo | cómo | 34 s de sonido |

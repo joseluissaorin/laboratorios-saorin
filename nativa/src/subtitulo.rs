@@ -28,21 +28,39 @@ impl Sub {
     pub fn dur(&self) -> f64 { (self.t1 - self.t0).max(0.05) }
 }
 
-/// LA LETRA: las tres familias que trae el taller.
-pub const FAMILIAS: [(&str, &[u8]); 3] = [
-    ("Fraunces · serif", include_bytes!("../assets/fonts/Fraunces-Text.ttf")),
-    ("Space Grotesk", include_bytes!("../assets/fonts/SpaceGrotesk-Regular.ttf")),
-    ("Space Grotesk negra", include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf")),
+/// LA LETRA: las familias que trae el taller, cada una con su NEGRITA de
+/// verdad cuando la hay. Donde no la hay se engorda el trazo (§rasteriza),
+/// que es lo que hace un cajista cuando no tiene la fundición completa.
+pub const FAMILIAS: [(&str, &[u8], Option<&[u8]>); 3] = [
+    ("Fraunces · serif",
+     include_bytes!("../assets/fonts/Fraunces-Text.ttf"), None),
+    ("Space Grotesk",
+     include_bytes!("../assets/fonts/SpaceGrotesk-Regular.ttf"),
+     Some(include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"))),
+    ("Caveat · a mano",
+     include_bytes!("../assets/fonts/Caveat-Medium.ttf"), None),
 ];
 
-/// LOS COLORES DE LA LETRA. Nada de blanco puro: sobre película quema y se
-/// separa de todo lo demás. El primero es el hueso del zine.
-pub const TINTAS: [(&str, [f32; 3]); 4] = [
+/// LOS COLORES DE LA CASA, que son ATAJOS y no la única opción: el color del
+/// pie es libre (tres números). Nada de blanco puro por defecto: sobre
+/// película quema y se separa de todo lo demás. El primero es el hueso del
+/// zine.
+pub const TINTAS: [(&str, [f32; 3]); 6] = [
     ("hueso", [0.949, 0.933, 0.894]),
     ("ámbar", [0.969, 0.792, 0.475]),
     ("blanco", [1.0, 1.0, 1.0]),
     ("tinta", [0.106, 0.098, 0.086]),
+    ("rojo", [0.851, 0.2, 0.145]),
+    ("ultramar", [0.169, 0.231, 0.78]),
 ];
+
+/// el nombre del color si es uno de los de la casa, y si no sus números
+pub fn nombre_color(c: [f32; 3]) -> String {
+    for (n, t) in TINTAS.iter() {
+        if (0..3).all(|k| (c[k] - t[k]).abs() < 0.004) { return n.to_string(); }
+    }
+    format!("{:.0} {:.0} {:.0}", c[0] * 255.0, c[1] * 255.0, c[2] * 255.0)
+}
 
 /// LOS IDIOMAS que el oído entiende de una lista corta. El código es el que
 /// espera whisper; `""` es «que lo adivine él», que sirve cuando la bobina
@@ -70,7 +88,10 @@ pub struct Estilo {
     pub familia: u8,
     /// cuerpo de la letra, en fracción del ALTO del lienzo
     pub cuerpo: f32,
-    pub tinta: u8,
+    /// EL COLOR, libre (0..1 por canal). Los de `TINTAS` son atajos.
+    pub color: [f32; 3],
+    pub negrita: bool,
+    pub cursiva: bool,
     /// cuánta sombra (0 = ninguna)
     pub sombra: f32,
     /// contorno duro, en fracción del cuerpo (0 = ninguno)
@@ -92,7 +113,9 @@ impl Default for Estilo {
         Estilo {
             familia: 0,
             cuerpo: 0.046,
-            tinta: 0,
+            color: TINTAS[0].1,
+            negrita: false,
+            cursiva: false,
             sombra: 0.75,
             borde: 0.0,
             caja: 0.0,
@@ -107,7 +130,8 @@ impl Default for Estilo {
 impl Estilo {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
-            "familia": self.familia, "cuerpo": self.cuerpo, "tinta": self.tinta,
+            "familia": self.familia, "cuerpo": self.cuerpo,
+            "color": self.color, "negrita": self.negrita, "cursiva": self.cursiva,
             "sombra": self.sombra, "borde": self.borde, "caja": self.caja,
             "margen": self.margen, "mayusculas": self.mayusculas,
             "ancho_linea": self.ancho_linea, "idioma": self.idioma,
@@ -121,7 +145,18 @@ impl Estilo {
         Estilo {
             familia: v["familia"].as_u64().unwrap_or(d.familia as u64).min(2) as u8,
             cuerpo: f("cuerpo", d.cuerpo).clamp(0.02, 0.12),
-            tinta: v["tinta"].as_u64().unwrap_or(d.tinta as u64).min(3) as u8,
+            // el color puede venir suelto o, en bobinas de antes, como el
+            // índice «tinta» de la lista corta: se traduce y no se pierde
+            color: match v["color"].as_array() {
+                Some(a) if a.len() == 3 => {
+                    let g = |k: usize| a[k].as_f64().unwrap_or(0.9) as f32;
+                    [g(0).clamp(0.0, 1.0), g(1).clamp(0.0, 1.0), g(2).clamp(0.0, 1.0)]
+                }
+                _ => TINTAS[(v["tinta"].as_u64().unwrap_or(0) as usize)
+                            .min(TINTAS.len() - 1)].1,
+            },
+            negrita: v["negrita"].as_bool().unwrap_or(d.negrita),
+            cursiva: v["cursiva"].as_bool().unwrap_or(d.cursiva),
             sombra: f("sombra", d.sombra).clamp(0.0, 1.0),
             borde: f("borde", d.borde).clamp(0.0, 0.2),
             caja: f("caja", d.caja).clamp(0.0, 1.0),
@@ -140,7 +175,9 @@ impl Estilo {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         texto.hash(&mut h);
         self.familia.hash(&mut h);
-        self.tinta.hash(&mut h);
+        for c in self.color { ((c * 1000.0) as i64).hash(&mut h); }
+        self.negrita.hash(&mut h);
+        self.cursiva.hash(&mut h);
         self.mayusculas.hash(&mut h);
         self.ancho_linea.hash(&mut h);
         ph.hash(&mut h);
@@ -197,7 +234,15 @@ pub fn rasteriza(base: &Path, e: &Estilo, texto: &str, pw: u32, ph: u32)
     std::fs::create_dir_all(&dir).ok()?;
     let ruta = dir.join(format!("{:016x}.png", e.huella(&texto, ph)));
 
-    let fuente = FontRef::try_from_slice(FAMILIAS[(e.familia as usize).min(2)].1).ok()?;
+    // LA NEGRITA, de la fundición si la hay. Space Grotesk trae su negra de
+    // verdad; Fraunces y Caveat no, y a ésas se les engorda el trazo abajo.
+    let fam = &FAMILIAS[(e.familia as usize).min(FAMILIAS.len() - 1)];
+    let (bytes, negrita_falsa) = match (e.negrita, fam.2) {
+        (true, Some(b)) => (b, false),
+        (true, None) => (fam.1, true),
+        (false, _) => (fam.1, false),
+    };
+    let fuente = FontRef::try_from_slice(bytes).ok()?;
     let px = (e.cuerpo * ph as f32).max(8.0);
     let escala = PxScale::from(px);
     let sf = fuente.as_scaled(escala);
@@ -223,9 +268,15 @@ pub fn rasteriza(base: &Path, e: &Estilo, texto: &str, pw: u32, ph: u32)
     // mirando el mismo plano. Un halo de 0.22 del cuerpo despega el texto de
     // CUALQUIER fondo y sigue sin parecer una caja, que es lo que envejece.
     let radio = (px * 0.22 * e.sombra).max(if e.borde > 0.0 { px * e.borde } else { 0.0 });
-    let pad = (radio * 2.0 + px * 0.18).ceil();
-    let iw = ((ancho_max + pad * 2.0).ceil() as u32).clamp(8, pw.max(8) * 2);
-    let ih = ((alto_linea * lineas.len() as f32 + pad * 2.0).ceil() as u32).max(8);
+    // y sitio para lo que engorda la negrita falsa y para lo que la CURSIVA
+    // se sale por la derecha al inclinarse
+    let engorde = if negrita_falsa { px * 0.028 } else { 0.0 };
+    let tan = if e.cursiva { INCLINACION } else { 0.0 };
+    let alto_txt = alto_linea * lineas.len() as f32;
+    let pad = (radio * 2.0 + px * 0.18 + engorde * 2.0).ceil();
+    let vuelo = (alto_txt * tan).ceil();
+    let iw = ((ancho_max + pad * 2.0 + vuelo).ceil() as u32).clamp(8, pw.max(8) * 2);
+    let ih = ((alto_txt + pad * 2.0).ceil() as u32).max(8);
 
     if ruta.is_file() {
         return Some((ruta, iw, ih));
@@ -233,8 +284,10 @@ pub fn rasteriza(base: &Path, e: &Estilo, texto: &str, pw: u32, ph: u32)
 
     // ── la máscara del texto ────────────────────────────────────────────
     let mut mask = vec![0.0f32; (iw * ih) as usize];
+    #[allow(unused_mut)]
     for (li, linea) in lineas.iter().enumerate() {
-        let mut x = (iw as f32 - anchos[li]) / 2.0;
+        // centrado teniendo en cuenta el vuelo de la cursiva
+        let mut x = (iw as f32 - vuelo - anchos[li]) / 2.0;
         let y = pad + li as f32 * alto_linea + sf.ascent();
         let mut prev: Option<ab_glyph::GlyphId> = None;
         for ch in linea.chars() {
@@ -256,6 +309,20 @@ pub fn rasteriza(base: &Path, e: &Estilo, texto: &str, pw: u32, ph: u32)
         }
     }
 
+    // ── LA NEGRITA FALSA y LA CURSIVA, sobre la máscara ─────────────────
+    // Las dos se hacen sobre el mapa de cobertura y no sobre el contorno:
+    // engordar es dilatar, e inclinar es correr cada fila un poco más que la
+    // de abajo. Así valen para cualquier letra, tenga o no su negra.
+    if negrita_falsa {
+        mask = dilata(&mask, iw, ih, engorde.max(1.0) as u32);
+    }
+    if e.cursiva {
+        // el eje de giro es la LÍNEA BASE de cada renglón, no el borde del
+        // lienzo: si no, la última línea saldría mucho más corrida que la
+        // primera y el bloque se abriría en abanico
+        mask = inclina(&mask, iw, ih, tan, pad, alto_linea, lineas.len());
+    }
+
     // ── la sombra: la máscara difuminada y bajada un pelo ────────────────
     let sombra = if e.sombra > 0.001 {
         let mut s = desplaza(&mask, iw, ih, 0, (px * 0.045).round() as i32);
@@ -271,7 +338,7 @@ pub fn rasteriza(base: &Path, e: &Estilo, texto: &str, pw: u32, ph: u32)
     } else { None };
 
     // ── componer ────────────────────────────────────────────────────────
-    let tinta = TINTAS[(e.tinta as usize).min(3)].1;
+    let tinta = e.color;
     let mut img = image::RgbaImage::new(iw, ih);
     for y in 0..ih {
         for x in 0..iw {
@@ -352,6 +419,36 @@ fn difumina(m: &[f32], w: u32, h: u32, r: u32) -> Vec<f32> {
                 s += tmp[(yy * w + x) as usize];
             }
             o[(y * w + x) as usize] = s / n;
+        }
+    }
+    o
+}
+
+/// CUÁNTO SE INCLINA LA CURSIVA. Doce grados es lo que usan las itálicas
+/// falsas de toda la vida: menos no se nota y más parece un error.
+const INCLINACION: f32 = 0.2126;   // tan 12°
+
+/// INCLINAR LA MÁSCARA renglón a renglón, con el eje en la línea base de
+/// cada uno. Muestreo con interpolación lineal para que el canto no salga
+/// escalonado.
+fn inclina(m: &[f32], w: u32, h: u32, tan: f32,
+           pad: f32, alto_linea: f32, n: usize) -> Vec<f32> {
+    let mut o = vec![0.0f32; m.len()];
+    for y in 0..h {
+        // ¿de qué renglón es esta fila? su base manda
+        let li = (((y as f32 - pad) / alto_linea).floor() as isize)
+            .clamp(0, n.saturating_sub(1) as isize) as f32;
+        let base = pad + (li + 1.0) * alto_linea;
+        let dx = (base - y as f32) * tan;
+        for x in 0..w {
+            let sx = x as f32 - dx;
+            let x0 = sx.floor();
+            let f = sx - x0;
+            let leer = |xx: f32| -> f32 {
+                if xx < 0.0 || xx >= w as f32 { 0.0 }
+                else { m[(y * w + xx as u32) as usize] }
+            };
+            o[(y * w + x) as usize] = leer(x0) * (1.0 - f) + leer(x0 + 1.0) * f;
         }
     }
     o

@@ -73,6 +73,7 @@ fn q_titulo(q: Ventana) -> &'static str {
         Ventana::Chuleta => "LA CHULETA",
         Ventana::Vigia => "EL VIGÍA",
         Ventana::Bobinas => "LAS BOBINAS",
+        Ventana::Oido => "EL OÍDO",
     }
 }
 
@@ -163,7 +164,7 @@ fn quita_marca(base: &std::path::Path) {
 /// La FICHA DEL CLIP no se saca: vive en la mesa, al lado del visor, porque
 /// hay que verla mientras se mueve la imagen. Sacarla sería empeorarla.
 #[derive(PartialEq, Clone, Copy, Debug)]
-enum Ventana { Ajustes, Chuleta, Vigia, Bobinas }
+enum Ventana { Ajustes, Chuleta, Vigia, Bobinas, Oido }
 
 impl Ventana {
     fn titulo(self) -> &'static str {
@@ -172,6 +173,7 @@ impl Ventana {
             Ventana::Chuleta => "LA CHULETA · Laboratorios Saorín",
             Ventana::Vigia => "EL VIGÍA · Laboratorios Saorín",
             Ventana::Bobinas => "LAS BOBINAS · Laboratorios Saorín",
+            Ventana::Oido => "EL OÍDO · Laboratorios Saorín",
         }
     }
     fn clave(self) -> &'static str {
@@ -180,6 +182,7 @@ impl Ventana {
             Ventana::Chuleta => "chuleta",
             Ventana::Vigia => "vigia",
             Ventana::Bobinas => "bobinas",
+            Ventana::Oido => "oido",
         }
     }
     fn tam(self) -> (f64, f64) {
@@ -188,6 +191,7 @@ impl Ventana {
             Ventana::Chuleta => (800.0, 660.0),
             Ventana::Vigia => (960.0, 560.0),
             Ventana::Bobinas => (460.0, 620.0),
+            Ventana::Oido => (520.0, 560.0),
         }
     }
 }
@@ -381,6 +385,13 @@ struct Estado {
     escribiendo_sub: Option<(usize, String)>,
     /// el oído en marcha (el shell transcribiendo) y adónde deja el .srt
     oyendo: Option<(std::process::Child, std::path::PathBuf)>,
+    /// LO QUE SE ELIGE ANTES DE ESCUCHAR (la ventana del oído)
+    oido_desde: std::time::Instant,
+    oido_rango: bool,
+    /// de dónde se escucha: 0 = el sonido de los planos · 1.. = un carril
+    /// de música (que es donde cae una voz en off desacoplada)
+    oido_fuente: usize,
+    oido_modelo: usize,
     /// escribiendo un número a mano: (clip, campo, texto)
     tecleando: Option<(usize, u8, String)>,
     /// el rótulo que se está reescribiendo (§5): a qué clip sustituir
@@ -819,6 +830,10 @@ impl ApplicationHandler for App {
             sel_sub: None,
             escribiendo_sub: None,
             oyendo: None,
+            oido_desde: std::time::Instant::now(),
+            oido_rango: false,
+            oido_fuente: 0,
+            oido_modelo: usize::MAX,   // MAX = «el que diga la máquina»
             tecleando: None,
             retitulando: None,
             bobina_menu: None,
@@ -918,6 +933,45 @@ impl ApplicationHandler for App {
                             e.toca_ajuste(&mut self.proyecto, fila);
                         }
                         Ventana::Chuleta => {}
+                        // ── LA VENTANA DEL OÍDO ──────────────────────
+                        Ventana::Oido => {
+                            let y = my - cab;
+                            let f = ((y - Estado::OIDO_Y0 - 14.0) / Estado::OIDO_FILA)
+                                .floor();
+                            let atras = e.mods.shift_key();
+                            let pr = &mut self.proyecto;
+                            if (0.0..4.0).contains(&f) {
+                                match f as usize {
+                                    0 => {
+                                        let n = subtitulo::IDIOMAS.len() as u8;
+                                        let i = &mut pr.estilo_sub.idioma;
+                                        *i = if atras { (*i + n - 1) % n } else { (*i + 1) % n };
+                                        let _ = pr.guarda();
+                                    }
+                                    1 => e.oido_rango = !e.oido_rango,
+                                    2 => {
+                                        let n = pr.audio.len() + 1;
+                                        e.oido_fuente = (e.oido_fuente + 1) % n;
+                                    }
+                                    _ => {
+                                        // el modelo cicla: máquina → ligero →
+                                        // de casa → el mejor → máquina
+                                        e.oido_modelo = match e.oido_modelo {
+                                            usize::MAX => 0,
+                                            2 => usize::MAX,
+                                            k => k + 1,
+                                        };
+                                    }
+                                }
+                                e.cristales[k].ventana.request_redraw();
+                                return;
+                            }
+                            let by = Estado::OIDO_Y0 + 4.0 * Estado::OIDO_FILA + 16.0;
+                            if y >= by && y <= by + 40.0 {
+                                e.pon_el_oido(pr);
+                                e.cristales[k].ventana.request_redraw();
+                            }
+                        }
                         Ventana::Bobinas => {
                             let fila = ((my - cab - 46.0) / Estado::BOBINA_FILA) as i32;
                             let a = e.toca_bobina(&self.proyecto, fila);
@@ -3121,7 +3175,9 @@ impl Estado {
             A::Desacopla => self.desacopla(pr),
             A::InsertaBobina => self.inserta_bobina(pr),
             A::MarcasCompas => self.marcas_al_compas(pr),
-            A::Subtitular => self.pon_el_oido(pr),
+            // «Subtítulos automáticos» ABRE LA VENTANA: hay que elegir la
+            // lengua, el trozo y el sonido antes de gastar un minuto de CPU
+            A::Subtitular => self.ventana_pedida = Some(Ventana::Oido),
             // LA LENGUA se elige ANTES de escuchar, y antes de escuchar no hay
             // ningún subtítulo que elegir para llegar a su ficha: por eso está
             // también aquí
@@ -3346,6 +3402,7 @@ impl Estado {
             Ventana::Ajustes => self.dibuja_ajustes_en(pr, &mut d, ancho, alto, false),
             Ventana::Bobinas => self.dibuja_bobinas_en(pr, &mut d, ancho, alto),
             Ventana::Chuleta => self.dibuja_chuleta_en(&mut d, ancho, alto, false),
+            Ventana::Oido => self.dibuja_oido_en(pr, &mut d, ancho, alto),
             Ventana::Vigia => {
                 // el vigía dice lo justo: el timecode y si está proyectando
                 let f = pr.fps.max(1.0);
@@ -6946,21 +7003,50 @@ impl Estado {
         if self.oyendo.is_some() { self.di("el oído ya está escuchando"); return; }
         if self.revelando.is_some() { self.di("espera a que acabe el revelado"); return; }
         let inicios = pr.inicios();
-        let trabajos: Vec<serde_json::Value> = pr.clips.iter().enumerate()
-            // marcha atrás y congelado se quedan fuera: al revés no hay habla
-            // que transcribir, y congelado no suena
-            .filter(|(_, c)| !c.hueco && !c.mute && !c.ausente && c.anidada.is_none()
-                    && c.speed > 0.02)
-            .map(|(i, c)| serde_json::json!({
-                "file": c.media,
-                "in": c.t_in, "out": c.t_out,
-                // el desfase del sonido cuenta: si la voz va corrida, el pie
-                // tiene que ir corrido con ella
-                "desde": inicios.get(i).copied().unwrap_or(0.0) + c.desfase,
-                "speed": c.speed,
-            })).collect();
+        // ¿SÓLO EL TRAMO MARCADO? Lo dice la ventana del oído.
+        let (ra, rb) = if self.oido_rango && pr.rango.is_some() { pr.tramo() }
+                       else { (0.0, f64::MAX) };
+        let trabajos: Vec<serde_json::Value> = if self.oido_fuente > 0 {
+            // DE UNA PISTA DE MÚSICA (ahí es donde cae una voz en off, o el
+            // sonido de un plano desacoplado)
+            match pr.audio.get(self.oido_fuente - 1) {
+                Some(x) if x.entra() < rb && x.entra() + x.dur() > ra => {
+                    let recorta_a = (ra - x.entra()).max(0.0);
+                    let recorta_b = (rb - x.entra()).min(x.dur());
+                    vec![serde_json::json!({
+                        "file": x.media,
+                        "in": x.t_in + recorta_a, "out": x.t_in + recorta_b,
+                        "desde": (x.entra() + recorta_a).max(0.0), "speed": 1.0,
+                    })]
+                }
+                _ => Vec::new(),
+            }
+        } else {
+            pr.clips.iter().enumerate()
+                // marcha atrás y congelado se quedan fuera: al revés no hay
+                // habla que transcribir, y congelado no suena
+                .filter(|(_, c)| !c.hueco && !c.mute && !c.ausente && c.anidada.is_none()
+                        && c.speed > 0.02)
+                .filter_map(|(i, c)| {
+                    let ini = inicios.get(i).copied().unwrap_or(0.0);
+                    let fin = ini + c.dur();
+                    if fin <= ra || ini >= rb { return None; }
+                    // el clip se recorta por donde lo parta el rango
+                    let v = c.speed.abs().max(0.02);
+                    let corta_a = (ra - ini).max(0.0) * v;
+                    let corta_b = c.dur().min(rb - ini).max(0.0) * v;
+                    Some(serde_json::json!({
+                        "file": c.media,
+                        "in": c.t_in + corta_a, "out": c.t_in + corta_b,
+                        // el desfase del sonido cuenta: si la voz va corrida,
+                        // el pie tiene que ir corrido con ella
+                        "desde": ini.max(ra) + c.desfase,
+                        "speed": c.speed,
+                    }))
+                }).collect()
+        };
         if trabajos.is_empty() {
-            self.di("no hay ningún plano con sonido que escuchar");
+            self.di("no hay ningún plano con sonido que escuchar en ese trozo");
             return;
         }
         let lista = std::env::temp_dir().join("saorin_oido.json");
@@ -6977,10 +7063,17 @@ impl Estado {
                 .parent().unwrap().join("shell/target/release").join(nom));
         match std::process::Command::new(&bin)
             .args(["cli", "oye", "--trabajos", lista.to_str().unwrap_or(""),
-                   // sin «--modelo»: lo elige el taller según la máquina
                    "--idioma", subtitulo::IDIOMAS[(pr.estilo_sub.idioma as usize)
                                                   .min(subtitulo::IDIOMAS.len() - 1)].1,
+                   // EL LARGO DEL PIE atado al ancho de línea del estilo: lo
+                   // que se transcribe cabe EXACTAMENTE en dos renglones de
+                   // los que va a dibujar el rasterizador
+                   "--largo", &(pr.estilo_sub.ancho_linea * 2).to_string(),
                    "--out", srt.to_str().unwrap_or("")])
+            .args(match self.oido_modelo {
+                usize::MAX => vec![],        // que lo elija la máquina
+                k => vec!["--modelo".to_string(), k.to_string()],
+            })
             .env("FL_MEDIA", pr.base.join("media"))
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
             .spawn()
@@ -6994,14 +7087,26 @@ impl Estado {
                         for linea in std::io::BufReader::new(err).lines().flatten() {
                             // el diario del shell viene con «⟨ 1.2s⟩ » delante
                             let l = linea.rsplit('⟩').next().unwrap_or(&linea).trim().to_string();
-                            if !l.is_empty() && !l.starts_with('%') {
-                                let mut p = prog.lock().unwrap();
-                                p.1 = l.chars().take(60).collect();
-                            }
+                            // sólo renglones que DIGAN algo: los medidores de
+                            // los programas de fuera son números y guiones
+                            if !l.chars().any(|c| c.is_alphabetic()) { continue; }
+                            // «el oído: plano 3 de 7» → la barra sabe por dónde va
+                            let avance = l.strip_prefix("el oído: plano ")
+                                .and_then(|r| r.split_once(" de "))
+                                .and_then(|(a, b)| {
+                                    let n: f32 = a.trim().parse().ok()?;
+                                    let m: f32 = b.split(' ').next()?.trim().parse().ok()?;
+                                    Some((n / m.max(1.0)).clamp(0.0, 1.0))
+                                });
+                            let mut p = prog.lock().unwrap();
+                            if let Some(v) = avance { p.0 = v; }
+                            else if l.starts_with("bajando") { p.0 = 0.02; }
+                            p.1 = l.chars().take(60).collect();
                         }
                     });
                 }
                 self.oyendo = Some((c, srt));
+                self.oido_desde = std::time::Instant::now();
                 self.di("el oído: escuchando la bobina…");
             }
             Err(_) => self.di("no encuentro el oído (falta el binario del taller)"),
@@ -7033,6 +7138,95 @@ impl Estado {
         self.di(&format!("{} subtítulo(s) — clic para corregirlos", pr.subs.len()));
         Self::avisa_al_sistema("Subtítulos listos",
                                &format!("{} líneas en la pista del pie", pr.subs.len()));
+    }
+
+    /// LAS FILAS DE LA VENTANA DEL OÍDO, en un solo sitio: las lee el dibujo
+    /// y las lee el ratón (la lección de la sala de revelado).
+    const OIDO_Y0: f32 = 92.0;
+    const OIDO_FILA: f32 = 46.0;
+
+    /// cuántas cosas hay que elegir antes de escuchar
+    fn oido_filas(pr: &Proyecto) -> usize { 4 + pr.audio.len().min(8) * 0 + 1 }
+
+    /// EL OÍDO, EN SU VENTANA: lo que se elige antes de escuchar y cómo va
+    /// mientras escucha. Existe porque «subtítulos automáticos» tenía que
+    /// preguntar y no preguntaba: en qué lengua, de qué trozo, de qué sonido
+    /// y con qué modelo — y luego no decía por dónde iba.
+    fn dibuja_oido_en(&mut self, pr: &Proyecto, d: &mut ui::Dibujo, ancho: f32, alto: f32) {
+        let x = 26.0;
+        d.texto_f(ui::Familia::Grot, x, 26.0, "SUBTÍTULOS AUTOMÁTICOS", 13.0, paleta::TINTA);
+        d.texto(x, 48.0, "un modelo que corre AQUÍ · no sale nada de la máquina",
+                8.5, paleta::TINTA_TENUE);
+        trazo::subraya(d, x, ancho - 26.0, 62.0, 1.4, paleta::TINTA_TENUE, 61);
+
+        let fila = |d: &mut ui::Dibujo, i: usize, rot: &str, val: &str, orden: u32| {
+            let y = Self::OIDO_Y0 + i as f32 * Self::OIDO_FILA;
+            d.texto(x, y, rot, 8.5, paleta::TINTA_TENUE);
+            trazo::caja(d, x, y + 14.0, ancho - 52.0, 24.0, 1.2, paleta::TINTA_TENUE,
+                        orden);
+            d.texto_f(ui::Familia::Mano, x + 10.0, y + 16.0, val, 16.0, paleta::TINTA);
+        };
+        let e = &pr.estilo_sub;
+        fila(d, 0, "LA LENGUA",
+             subtitulo::IDIOMAS[(e.idioma as usize).min(subtitulo::IDIOMAS.len() - 1)].0, 62);
+        let (ra, rb) = pr.tramo();
+        fila(d, 1, "QUÉ TROZO",
+             &if self.oido_rango && pr.rango.is_some() {
+                 format!("sólo el rango · {ra:.1} → {rb:.1} s")
+             } else { format!("toda la bobina · {:.1} s", pr.duracion()) }, 63);
+        fila(d, 2, "DE QUÉ SONIDO", &self.oido_fuente_nombre(pr), 64);
+        fila(d, 3, "EL MODELO",
+             &match self.oido_modelo {
+                 usize::MAX => "el que pida la máquina".to_string(),
+                 k => format!("{}", ["ligero", "el de casa", "el mejor"]
+                              [k.min(2)]),
+             }, 65);
+
+        // ── el botón y la barra ──────────────────────────────────────
+        let by = Self::OIDO_Y0 + 4.0 * Self::OIDO_FILA + 16.0;
+        let oyendo = self.oyendo.is_some();
+        trazo::caja(d, x, by, ancho - 52.0, 40.0, 1.8,
+                    if oyendo { paleta::TINTA_TENUE } else { paleta::ROJO }, 66);
+        d.texto_f(ui::Familia::Grot, x + 16.0, by + 13.0,
+                  if oyendo { "ESCUCHANDO…" } else { "ESCUCHAR" }, 12.0,
+                  if oyendo { paleta::TINTA_TENUE } else { paleta::ROJO });
+        if oyendo {
+            let (p, paso) = self.progreso.lock().map(|g| g.clone())
+                .unwrap_or((0.0, String::new()));
+            // LA BARRA: sin porcentaje inventado. El oído no sabe cuánto le
+            // queda hasta que acaba un plano, así que la barra avanza por
+            // planos y el renglón de abajo dice lo que está haciendo.
+            let bw = ancho - 52.0;
+            let y2 = by + 52.0;
+            d.rect(x, y2, bw, 8.0, [0.80, 0.78, 0.72, 1.0]);
+            d.rect(x, y2, bw * p.clamp(0.03, 1.0), 8.0, paleta::ROJO);
+            let t: String = paso.chars().take(52).collect();
+            d.texto(x, y2 + 16.0, &t, 8.5, paleta::TINTA);
+            let seg = self.oido_desde.elapsed().as_secs();
+            d.texto(x, y2 + 30.0, &format!("{}:{:02} escuchando", seg / 60, seg % 60),
+                    8.5, paleta::TINTA_TENUE);
+        } else {
+            d.texto(x, by + 52.0,
+                    &format!("hay {} subtítulo(s) en la pista", pr.subs.len()),
+                    8.5, paleta::TINTA_TENUE);
+            d.texto(x, by + 68.0,
+                    "escuchar otra vez REEMPLAZA los que haya", 8.5, paleta::TINTA_TENUE);
+        }
+        let _ = alto;
+    }
+
+    /// el nombre de la fuente de sonido elegida
+    fn oido_fuente_nombre(&self, pr: &Proyecto) -> String {
+        if self.oido_fuente == 0 {
+            let n = pr.clips.iter()
+                .filter(|c| !c.hueco && !c.mute && !c.ausente && c.speed > 0.02).count();
+            return format!("el sonido de los planos · {n} con voz");
+        }
+        match pr.audio.get(self.oido_fuente - 1) {
+            Some(a) => format!("la pista «{}»",
+                               a.media.chars().take(26).collect::<String>()),
+            None => "el sonido de los planos".into(),
+        }
     }
 
     /// LA REJILLA DE MANDOS DEL PIE, en un solo sitio: la lección de la sala
@@ -7627,8 +7821,23 @@ impl Estado {
                 let col = if mx >= fx + 4.0 && mx <= fx + 78.0 { Some(0) }
                           else if mx >= fx + 84.0 && mx <= fx + 158.0 { Some(1) }
                           else { None };
-                let fila = if my >= ey && my <= ey + 140.0 {
+                let fila = if my >= ey && my <= ey + 188.0 {
                     Some(((my - ey) / 24.0).floor() as usize) } else { None };
+                // LOS TRES NÚMEROS DEL COLOR viven en su fila y en su rejilla
+                // de tres, no en la de dos: se miran aparte
+                if my >= ey + 72.0 && my <= ey + 92.0 {
+                    let k = ((mx - fx - 4.0) / 52.0).floor();
+                    if k >= 0.0 && k < 3.0 {
+                        self.recuerda(pr);
+                        let d = if self.mods.shift_key() { -0.08 } else { 0.08 };
+                        let v = &mut pr.estilo_sub.color[k as usize];
+                        *v = (*v + d).clamp(0.0, 1.0);
+                        let _ = pr.guarda();
+                        self.refresca_pie(pr);
+                        self.visor.foley(sonido::Foley::Tick);
+                        return;
+                    }
+                }
                 if let (Some(c), Some(f)) = (col, fila) {
                     let atras = self.mods.shift_key();
                     let paso = |v: f32, d: f32, lo: f32, hi: f32, atras: bool| -> f32 {
@@ -7645,19 +7854,34 @@ impl Estado {
                     let mut partir = false;
                     let mut volver_a_oir = false;
                     match (f, c) {
-                        (0, 0) => e.familia = (e.familia + 1) % 3,
-                        (0, 1) => e.tinta = (e.tinta + 1) % 4,
-                        (1, 0) => e.cuerpo = paso(e.cuerpo, 0.004, 0.026, 0.075, atras),
-                        (1, 1) => e.margen = paso(e.margen, 0.015, 0.03, 0.30, atras),
-                        (2, 0) => e.sombra = paso(e.sombra, 0.25, 0.0, 1.0, atras),
-                        (2, 1) => e.caja = if e.caja > 0.01 { 0.0 } else { 0.55 },
-                        (3, 0) => e.mayusculas = !e.mayusculas,
-                        (3, 1) => e.ancho_linea = if e.ancho_linea >= 46 { 28 }
+                        (0, 0) => e.familia = (e.familia + 1)
+                                              % subtitulo::FAMILIAS.len() as u8,
+                        (0, 1) => e.negrita = !e.negrita,
+                        (1, 0) => e.cursiva = !e.cursiva,
+                        (1, 1) => e.cuerpo = paso(e.cuerpo, 0.004, 0.026, 0.075, atras),
+                        // el color: la lista de la casa da la vuelta, y si el
+                        // color de ahora no es de la lista se entra por el primero
+                        (2, 0) => {
+                            let n = subtitulo::TINTAS.len();
+                            let k = subtitulo::TINTAS.iter().position(|(_, t)|
+                                (0..3).all(|j| (e.color[j] - t[j]).abs() < 0.004));
+                            let sig = match (k, atras) {
+                                (Some(i), false) => (i + 1) % n,
+                                (Some(i), true) => (i + n - 1) % n,
+                                (None, _) => 0,
+                            };
+                            e.color = subtitulo::TINTAS[sig].1;
+                        }
+                        (2, 1) => e.margen = paso(e.margen, 0.015, 0.03, 0.30, atras),
+                        (4, 0) => e.sombra = paso(e.sombra, 0.25, 0.0, 1.0, atras),
+                        (4, 1) => e.caja = if e.caja > 0.01 { 0.0 } else { 0.55 },
+                        (5, 0) => e.mayusculas = !e.mayusculas,
+                        (5, 1) => e.ancho_linea = if e.ancho_linea >= 46 { 28 }
                                                   else { e.ancho_linea + 6 },
-                        (4, 0) => e.idioma = (e.idioma + 1) % subtitulo::IDIOMAS.len() as u8,
-                        (4, 1) => volver_a_oir = true,
-                        (5, 0) => partir = true,
-                        (5, 1) => quitar = true,
+                        (6, 0) => e.idioma = (e.idioma + 1) % subtitulo::IDIOMAS.len() as u8,
+                        (6, 1) => volver_a_oir = true,
+                        (7, 0) => partir = true,
+                        (7, 1) => quitar = true,
                         _ => {}
                     }
                     if quitar {
@@ -9227,32 +9451,50 @@ impl Estado {
                 // la Y sale del MISMO sitio que la lee el ratón
                 let (ex, ey) = (fx + 4.0, self.pie_estilo_y(pr, is));
                 let _ = y;
-                bot(&mut d, ex, ey, subtitulo::FAMILIAS[(e.familia as usize).min(2)].0,
+                bot(&mut d, ex, ey,
+                    subtitulo::FAMILIAS[(e.familia as usize)
+                        .min(subtitulo::FAMILIAS.len() - 1)].0, false);
+                // NEGRITA y CURSIVA, cada una la suya
+                bot(&mut d, ex + 80.0, ey, "negrita", e.negrita);
+                bot(&mut d, ex, ey + 24.0, "cursiva", e.cursiva);
+                bot(&mut d, ex + 80.0, ey + 24.0, &format!("cuerpo {:.1}%", e.cuerpo * 100.0),
                     false);
-                bot(&mut d, ex + 80.0, ey, subtitulo::TINTAS[(e.tinta as usize).min(3)].0,
+                // EL COLOR: el nombre si es de la casa, los números si no, y
+                // la muestra al lado — que un nombre no dice qué color es
+                bot(&mut d, ex, ey + 48.0, &subtitulo::nombre_color(e.color), false);
+                d.rect(ex + 60.0, ey + 51.0, 14.0, 14.0,
+                       [e.color[0], e.color[1], e.color[2], 1.0]);
+                trazo::caja(&mut d, ex + 60.0, ey + 51.0, 14.0, 14.0, 1.0,
+                            paleta::TINTA_TENUE, 946);
+                bot(&mut d, ex + 80.0, ey + 48.0, &format!("alto {:.0}%", e.margen * 100.0),
                     false);
-                bot(&mut d, ex, ey + 24.0, &format!("cuerpo {:.1}%", e.cuerpo * 100.0), false);
-                bot(&mut d, ex + 80.0, ey + 24.0, &format!("alto {:.0}%", e.margen * 100.0),
-                    false);
-                bot(&mut d, ex, ey + 48.0,
-                    &format!("sombra {:.0}%", e.sombra * 100.0), e.sombra > 0.01);
-                bot(&mut d, ex + 80.0, ey + 48.0,
-                    if e.caja > 0.01 { "con caja" } else { "sin caja" }, e.caja > 0.01);
-                bot(&mut d, ex, ey + 72.0,
-                    if e.mayusculas { "MAYÚSCULAS" } else { "normal" }, e.mayusculas);
-                bot(&mut d, ex + 80.0, ey + 72.0, &format!("{} letras", e.ancho_linea), false);
-                // EL IDIOMA es de la pista y manda en el oído: se pone ANTES
-                // de escuchar, y por eso vive aquí y no en un diálogo aparte
+                // los tres números del color, para el que quiera el suyo
+                let rgb = |d: &mut ui::Dibujo, x: f32, rot: &str, v: f32, orden: u32| {
+                    trazo::caja(d, x, ey + 72.0, 46.0, 20.0, 1.1, paleta::TINTA_TENUE, orden);
+                    d.texto(x + 5.0, ey + 77.0, &format!("{rot} {:.0}", v * 255.0), 8.0,
+                            paleta::TINTA);
+                };
+                rgb(&mut d, ex, "R", e.color[0], 947);
+                rgb(&mut d, ex + 52.0, "V", e.color[1], 948);
+                rgb(&mut d, ex + 104.0, "A", e.color[2], 949);
                 bot(&mut d, ex, ey + 96.0,
+                    &format!("sombra {:.0}%", e.sombra * 100.0), e.sombra > 0.01);
+                bot(&mut d, ex + 80.0, ey + 96.0,
+                    if e.caja > 0.01 { "con caja" } else { "sin caja" }, e.caja > 0.01);
+                bot(&mut d, ex, ey + 120.0,
+                    if e.mayusculas { "MAYÚSCULAS" } else { "normal" }, e.mayusculas);
+                bot(&mut d, ex + 80.0, ey + 120.0, &format!("{} letras", e.ancho_linea),
+                    false);
+                bot(&mut d, ex, ey + 144.0,
                     subtitulo::IDIOMAS[(e.idioma as usize).min(7)].0, true);
-                bot(&mut d, ex + 80.0, ey + 96.0, "escuchar otra vez", false);
-                bot(&mut d, ex, ey + 120.0, "partir aquí", false);
-                bot(&mut d, ex + 80.0, ey + 120.0, "quitar (⌫)", false);
-                d.texto(fx + 4.0, ey + 146.0, "clic en el texto: escribirlo · ⏎ guarda",
+                bot(&mut d, ex + 80.0, ey + 144.0, "escuchar otra vez", false);
+                bot(&mut d, ex, ey + 168.0, "partir aquí", false);
+                bot(&mut d, ex + 80.0, ey + 168.0, "quitar (⌫)", false);
+                d.texto(fx + 4.0, ey + 194.0, "clic en el texto: escribirlo · ⏎ guarda",
                         8.0, paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, ey + 157.0, "clic en un mando: lo cicla · ⇧+clic: atrás",
+                d.texto(fx + 4.0, ey + 205.0, "clic en un mando: lo cicla · ⇧+clic: atrás",
                         8.0, paleta::TINTA_TENUE);
-                d.texto(fx + 4.0, ey + 168.0, "los bordes del bloque estiran el tiempo",
+                d.texto(fx + 4.0, ey + 216.0, "los bordes del bloque estiran el tiempo",
                         8.0, paleta::TINTA_TENUE);
             }
         } else

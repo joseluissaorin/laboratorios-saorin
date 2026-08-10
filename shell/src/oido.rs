@@ -58,7 +58,11 @@ pub fn modelo(taller: &Path, cual: usize, aviso: &dyn Fn(&str)) -> Result<PathBu
     // (Pasó: media hora buscando un SIGSEGV que era esto.)
     let tmp = ruta.with_extension(format!("parcial{}", std::process::id()));
     let salida = std::process::Command::new("curl")
-        .args(["-L", "--fail", "--retry", "3", "-o"])
+        // SIN EL MEDIDOR DE CURL: escribe su tabla de porcentajes a stderr y
+        // el taller la lee como si fueran pasos suyos — en la ventana del
+        // oído salía «0 0 0 0 --:--:--» en vez de decir qué estaba haciendo.
+        // El aviso de arriba ya dice que está bajando y cuánto pesa.
+        .args(["-L", "--fail", "--retry", "3", "-s", "-S", "-o"])
         .arg(&tmp)
         .arg(url)
         .status()
@@ -163,9 +167,56 @@ pub fn hay_gpu() -> bool {
         || cfg!(target_os = "macos") || cfg!(target_os = "windows")
 }
 
+/// CUÁNTO CABE EN UN SUBTÍTULO. Dos líneas de unos cuarenta y dos
+/// caracteres es la convención de toda la vida (Netflix, la BBC, el DVD):
+/// más no da tiempo a leerlo y menos parte las frases donde no toca.
+pub const LARGO_PIE: i32 = 84;
+
+/// LO QUE HACE QUE UN SUBTÍTULO SEA UN SUBTÍTULO y no un párrafo.
+///
+/// whisper devuelve por defecto **tramos de hasta treinta segundos**: un
+/// muro de texto que aparece de golpe. Es la queja más justa que se le puede
+/// hacer al oído, porque va contra lo que ES un subtítulo.
+///
+/// whisper.cpp sabe partirlo, pero hay que pedírselo con tres cosas a la vez:
+/// los tiempos POR TOKEN (sin ellos no sabe dónde cae cada palabra), el largo
+/// máximo, y que corte **por palabra** y no por carácter.
+fn como_partir(p: &mut whisper_rs::FullParams, largo: i32) {
+    p.set_token_timestamps(true);
+    p.set_max_len(largo.max(16));
+    p.set_split_on_word(true);
+}
+
+/// LO QUE DURA DE MENOS. Un pie de medio segundo no da tiempo ni a mirarlo:
+/// la práctica de toda la vida es un segundo mínimo. Se estira POR EL FINAL
+/// —nunca por el principio, que descuadraría con la voz— y sin pisar al
+/// siguiente.
+pub const MINIMO: f64 = 1.0;
+
+/// LO QUE DURA DE MÁS. Un subtítulo no se queda doce segundos en pantalla:
+/// se lee en dos y lo demás es un cartel. whisper a veces le cuelga a un
+/// tramo corto de habla el silencio que viene detrás — el largo en
+/// CARACTERES no lo detecta, porque el texto es corto; lo que sobra es
+/// TIEMPO. Siete segundos es el techo de la práctica (BBC, Netflix).
+pub const MAXIMO: f64 = 7.0;
+
+fn recorta_los_largos(trozos: &mut [Trozo]) {
+    for t in trozos.iter_mut() {
+        if t.t1 - t.t0 > MAXIMO { t.t1 = t.t0 + MAXIMO; }
+    }
+}
+
+fn estira_los_cortos(trozos: &mut [Trozo]) {
+    for i in 0..trozos.len() {
+        if trozos[i].t1 - trozos[i].t0 >= MINIMO { continue; }
+        let tope = trozos.get(i + 1).map(|s| s.t0 - 0.04).unwrap_or(f64::MAX);
+        trozos[i].t1 = (trozos[i].t0 + MINIMO).min(tope).max(trozos[i].t1);
+    }
+}
+
 /// TRANSCRIBIR. `idioma` vacío = que lo detecte él.
 pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
-               aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
+               largo: i32, aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
     use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     let pcm = pcm16k(ffmpeg, media)?;
     let segundos = pcm.len() as f64 / 16000.0;
@@ -193,10 +244,11 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
     // que no se invente frases en los silencios (la plaga de whisper)
     p.set_no_speech_thold(0.6);
     p.set_suppress_blank(true);
+    como_partir(&mut p, largo);
 
     let t0 = std::time::Instant::now();
     est.full(p, &pcm).map_err(|e| format!("transcribiendo: {e}"))?;
-    let mut trozos = Vec::new();
+    let mut trozos: Vec<Trozo> = Vec::new();
     for seg in est.as_iter() {
         let texto = seg.to_str_lossy().unwrap_or_default().to_string();
         let t = texto.trim();
@@ -206,6 +258,8 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
         let b = seg.end_timestamp() as f64 / 100.0;
         trozos.push(Trozo { t0: a, t1: b.max(a + 0.2), texto: t.to_string() });
     }
+    recorta_los_largos(&mut trozos);
+    estira_los_cortos(&mut trozos);
     let el = t0.elapsed().as_secs_f64();
     aviso(&format!("{} trozo(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
                    trozos.len(), el, segundos / el.max(0.001)));
@@ -215,7 +269,7 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
 /// ESCUCHAR LA BOBINA ENTERA: todos los planos con una sola carga del modelo
 /// (que es lo caro) y los tiempos ya puestos en la línea de tiempo.
 pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma: &str,
-                      aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
+                      largo: i32, aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
     use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     whisper_rs::install_logging_hooks();
     let ctx = WhisperContext::new_with_params(
@@ -246,6 +300,7 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
         p.set_n_threads(hilos as i32);
         p.set_no_speech_thold(0.6);
         p.set_suppress_blank(true);
+        como_partir(&mut p, largo);
         est.full(p, &pcm).map_err(|e| format!("transcribiendo: {e}"))?;
         // EL TIEMPO DE LA FUENTE AL DE LA BOBINA: un plano a media velocidad
         // dura el doble, así que lo que se oye en su segundo 3 cae en el 6
@@ -260,6 +315,8 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
         }
     }
     todos.sort_by(|a, b| a.t0.partial_cmp(&b.t0).unwrap_or(std::cmp::Ordering::Equal));
+    recorta_los_largos(&mut todos);
+    estira_los_cortos(&mut todos);
     let el = t00.elapsed().as_secs_f64();
     aviso(&format!("{} trozo(s) en {:.1} s · {:.1}× tiempo real · {hilos} hilos",
                    todos.len(), el, total_s / el.max(0.001)));

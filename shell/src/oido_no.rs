@@ -17,8 +17,9 @@ pub fn modelo(_taller: &Path, _cual: usize, _aviso: &dyn Fn(&str)) -> Result<Pat
     Err(SIN.into())
 }
 pub fn escucha(_m: &Path, _ff: &str, _media: &Path, _idioma: &str,
-               _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
+               _largo: i32, _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
 pub fn escucha_bobina(_m: &Path, _ff: &str, _t: &[Trabajo], _idioma: &str,
-                      _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
+                      _largo: i32, _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
+pub const LARGO_PIE: i32 = 84;
 pub fn srt(_t: &[Trozo]) -> String { String::new() }
 pub fn el_de_esta_maquina() -> usize { 0 }
