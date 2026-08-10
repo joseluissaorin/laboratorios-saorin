@@ -240,7 +240,12 @@ en el motor del oído igual que Metal en el Mac. Lo que costó montarlo ahí:
   compilar un programa simple»;
 - y **Ninja como generador** (`CMAKE_GENERATOR=Ninja`): con el generador de
   Visual Studio ese anidamiento se rompe igual aunque el entorno esté puesto.
-  Con Ninja no hay proyectos anidados que valga.
+  Con Ninja no hay proyectos anidados que valga. Dos avisos: hay que vaciar
+  `CMAKE_GENERATOR_INSTANCE` (vcvars deja `VSINSTALLDIR` y Ninja rechaza la
+  «instancia»)… y **borrar el `whisper-rs-sys-*` de `target`**, porque el
+  `CMakeCache.txt` de la tentativa anterior se acuerda de la instancia y la
+  vuelve a imponer aunque ya no esté en el entorno. Cambiar de generador
+  obliga a configurar desde cero.
 
 Los tres están en `compilatodo.bat` del GPD.
 
