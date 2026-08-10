@@ -2557,7 +2557,9 @@ pub fn cli(args: &[String]) -> i32 {
             }
             let ruta = resolve_media(&d, &media);
             let idioma = arg("--idioma").unwrap_or_else(|| "es".into());
-            let cual = arg("--modelo").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+            // sin --modelo manda la máquina: Metal aguanta el bueno, la CPU no
+            let cual = arg("--modelo").and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(crate::oido::el_de_esta_maquina);
             let salida = arg("--out").map(PathBuf::from)
                 .unwrap_or_else(|| d.tmp.join("subs.srt"));
             let aviso = |m: &str| {

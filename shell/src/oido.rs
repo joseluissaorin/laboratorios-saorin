@@ -10,10 +10,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// LOS MODELOS, del más ligero al mejor. El de casa es el turbo: en el M4 Max
-/// transcribe muy por encima del tiempo real y en el HX 370 aguanta bien,
-/// y a diferencia de `small` no confunde el español con el italiano en las
-/// frases cortas.
+/// LOS MODELOS, del más ligero al mejor.
 pub const MODELOS: [(&str, &str, u64); 3] = [
     ("ligero",
      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
@@ -25,6 +22,16 @@ pub const MODELOS: [(&str, &str, u64); 3] = [
      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
      1_080_000_000),
 ];
+
+/// EL MODELO DE ESTA MÁQUINA cuando nadie elige.
+///
+/// **Medido, no supuesto**: el turbo por Metal en el M4 Max va a 21× tiempo
+/// real; el mismo modelo por CPU en el HX 370 tardó más de diez minutos en
+/// 34 segundos de sonido, o sea 0,06×. En CPU el que sirve es el ligero.
+/// Quien quiera el bueno en Windows puede pedirlo y esperar.
+pub fn el_de_esta_maquina() -> usize {
+    if cfg!(target_os = "macos") { 1 } else { 0 }
+}
 
 fn nombre_modelo(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or("modelo.bin")
@@ -120,10 +127,22 @@ fn pcm16k_trozo(ffmpeg: &str, media: &Path, desde: f64, dur: f64)
         .collect())
 }
 
+/// CÓMO SE BUSCA LA FRASE, según quién trabaje.
+///
+/// Con **Metal** (el Mac) el haz de cinco sale casi gratis —21× tiempo real
+/// medido— y acierta más justo donde molesta: nombres propios y finales de
+/// frase. **En CPU** ese mismo haz multiplica el trabajo por cinco, así que
+/// allí se busca con haz corto: sigue siendo mejor que el muestreo voraz y
+/// no convierte un minuto de bobina en diez de espera.
+fn como_buscar() -> whisper_rs::SamplingStrategy {
+    let haz = if cfg!(target_os = "macos") { 5 } else { 2 };
+    whisper_rs::SamplingStrategy::BeamSearch { beam_size: haz, patience: 1.0 }
+}
+
 /// TRANSCRIBIR. `idioma` vacío = que lo detecte él.
 pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
                aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
-    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     let pcm = pcm16k(ffmpeg, media)?;
     let segundos = pcm.len() as f64 / 16000.0;
     aviso(&format!("{:.0} s de sonido · modelo {}", segundos,
@@ -138,7 +157,7 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
     // BEAM SEARCH y no muestreo voraz: en habla real la diferencia se nota
     // justo donde molesta (nombres propios, finales de frase). Cuesta ~30 %
     // más de tiempo y lo vale para un subtítulo, que se lee entero.
-    let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+    let mut p = FullParams::new(como_buscar());
     if !idioma.is_empty() { p.set_language(Some(idioma)); }
     p.set_translate(false);
     p.set_print_special(false);
@@ -174,7 +193,7 @@ pub fn escucha(modelo: &Path, ffmpeg: &str, media: &Path, idioma: &str,
 /// (que es lo caro) y los tiempos ya puestos en la línea de tiempo.
 pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma: &str,
                       aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> {
-    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
     whisper_rs::install_logging_hooks();
     let ctx = WhisperContext::new_with_params(
         modelo, WhisperContextParameters::default())
@@ -194,7 +213,7 @@ pub fn escucha_bobina(modelo: &Path, ffmpeg: &str, trabajos: &[Trabajo], idioma:
         if pcm.len() < 16000 / 4 { continue; }
         total_s += pcm.len() as f64 / 16000.0;
         let mut est = ctx.create_state().map_err(|e| format!("whisper: {e}"))?;
-        let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
+        let mut p = FullParams::new(como_buscar());
         if !idioma.is_empty() { p.set_language(Some(idioma)); }
         p.set_translate(false);
         p.set_print_special(false);

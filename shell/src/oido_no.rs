@@ -21,3 +21,4 @@ pub fn escucha(_m: &Path, _ff: &str, _media: &Path, _idioma: &str,
 pub fn escucha_bobina(_m: &Path, _ff: &str, _t: &[Trabajo], _idioma: &str,
                       _aviso: &dyn Fn(&str)) -> Result<Vec<Trozo>, String> { Err(SIN.into()) }
 pub fn srt(_t: &[Trozo]) -> String { String::new() }
+pub fn el_de_esta_maquina() -> usize { 0 }

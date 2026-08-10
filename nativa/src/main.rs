@@ -6967,7 +6967,8 @@ impl Estado {
                 .parent().unwrap().join("shell/target/release").join(nom));
         match std::process::Command::new(&bin)
             .args(["cli", "oye", "--trabajos", lista.to_str().unwrap_or(""),
-                   "--idioma", "es", "--modelo", "1",
+                   // sin «--modelo»: lo elige el taller según la máquina
+                   "--idioma", "es",
                    "--out", srt.to_str().unwrap_or("")])
             .env("FL_MEDIA", pr.base.join("media"))
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
