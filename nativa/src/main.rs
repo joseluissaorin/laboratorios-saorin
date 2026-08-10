@@ -7624,6 +7624,10 @@ impl Estado {
                         if n > hi + 1e-4 { lo } else if n < lo - 1e-4 { hi } else { n }
                     };
                     self.recuerda(pr);
+                    // cualquier gesto de la ficha cierra la escritura: si no,
+                    // el índice guardado puede señalar a otro subtítulo
+                    // después de partir o de quitar
+                    self.escribiendo_sub = None;
                     let e = &mut pr.estilo_sub;
                     let mut quitar = false;
                     let mut partir = false;
