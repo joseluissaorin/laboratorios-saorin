@@ -35,6 +35,21 @@ fn main() {
         _ => {}
     }
 
+    ventana();
+}
+
+/// LA VENTANA DEL ESTUDIO VIEJO. Sin la bandera `ventana` este binario es lo
+/// que de verdad es hoy: la herramienta de línea de órdenes que revela y
+/// escucha, y a la que llama el editor nativo.
+#[cfg(not(feature = "ventana"))]
+fn ventana() {
+    eprintln!("LABORATORIOS SAORÍN · el taller sin ventana.\n\
+               ·  el editor es «saorin-nativa»\n\
+               ·  aquí: `cli render --json …`, `cli oye …`, o `serve`");
+}
+
+#[cfg(feature = "ventana")]
+fn ventana() {
     let port = server::start();
     let q = std::env::var("FL_QUERY").map(|v| format!("?{v}")).unwrap_or_default();
     let url: tauri::Url = format!("http://127.0.0.1:{port}/{q}").parse().unwrap();

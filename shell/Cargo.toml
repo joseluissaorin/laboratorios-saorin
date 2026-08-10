@@ -5,7 +5,7 @@ edition = "2021"
 description = "LABORATORIOS SAORÍN — estudio de vídeo con revelado fílmico"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 # EL OÍDO: whisper.cpp enlazado estático. En el Mac por Metal; en Windows por
@@ -17,13 +17,19 @@ whisper-rs = { version = "0.16", default-features = false, optional = true }
 # libclang: en una máquina sin LLVM el taller entero no compilaría por una
 # función que igual no se usa. Con `--no-default-features` el revelado sigue
 # saliendo y el oído avisa de que no está.
-default = ["oido"]
+default = ["oido", "ventana"]
 oido = ["dep:whisper-rs"]
+# LA VENTANA DEL ESTUDIO VIEJO (webview de Tauri). El editor NATIVO la
+# sustituyó; lo que se usa de este binario es `cli` (revelar, el oído) y
+# `serve`. Se deja porque funciona, pero no se le debe la compilación: en
+# Windows tauri-build 2.6 no encuentra el `cargo:dev` de tauri y tumbaba el
+# taller ENTERO por una ventana que ya no abre nadie.
+ventana = ["dep:tauri", "dep:tauri-build"]
 
 # Metal SOLO en el Mac: en Windows ni existe, y pedirlo allí no compila
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", default-features = false, features = ["metal"], optional = true }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = [], optional = true }
 tiny_http = "0.12"
 rust-embed = { version = "8", features = ["compression", "include-exclude"] }
 serde_json = "1"
