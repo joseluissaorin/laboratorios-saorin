@@ -55,6 +55,15 @@ escaneado.
 - El resto son crates de Rust y paquetes de npm con sus propias licencias,
   declaradas en los `Cargo.toml` y `package.json`.
 
+## El oído (transcripción)
+
+`shell/` enlaza **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)**
+(MIT, de Georgi Gerganov) a través del crate `whisper-rs`. **Los modelos no
+se distribuyen aquí**: se bajan la primera vez que se usan desde el
+[repositorio de whisper.cpp en Hugging Face](https://huggingface.co/ggerganov/whisper.cpp)
+y se guardan en `<taller>/modelos/`. Son los pesos de **Whisper**, de OpenAI,
+publicados bajo MIT. Nada de lo que se transcribe sale de la máquina.
+
 ## Lo que NO está en el repositorio
 
 `assets/` (los restos de los experimentos), el metraje de rodaje y los
