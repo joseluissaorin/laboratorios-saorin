@@ -2534,11 +2534,26 @@ pub fn cli(args: &[String]) -> i32 {
             // o UN fichero (--media) o LA BOBINA ENTERA (--trabajos, una
             // lista de planos con su trozo y su sitio): con la lista el
             // modelo se carga UNA vez, que es lo caro
+            let mut mal_json: Option<String> = None;
             let lista: Vec<crate::oido::Trabajo> = match arg("--trabajos") {
                 Some(f) => {
-                    let v: serde_json::Value = std::fs::read(&f).ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .unwrap_or(serde_json::json!([]));
+                    // EL BOM: en Windows medio mundo escribe UTF-8 con marca
+                    // (PowerShell lo hace de serie) y serde no la traga. Antes
+                    // el fallo se tragaba con un `[]` y el parte decía «falta
+                    // --trabajos» cuando el fichero estaba ahí y bien puesto.
+                    let v: serde_json::Value = match std::fs::read(&f) {
+                        Ok(b) => {
+                            let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&b).to_vec();
+                            match serde_json::from_slice(&b) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    mal_json = Some(format!("{f}: {e}"));
+                                    serde_json::json!([])
+                                }
+                            }
+                        }
+                        Err(e) => { mal_json = Some(format!("{f}: {e}")); serde_json::json!([]) }
+                    };
                     v.as_array().cloned().unwrap_or_default().iter().map(|j| {
                         crate::oido::Trabajo {
                             fichero: resolve_media(&d, j["file"].as_str().unwrap_or("")),
@@ -2552,6 +2567,10 @@ pub fn cli(args: &[String]) -> i32 {
                 None => Vec::new(),
             };
             let media = arg("--media").unwrap_or_default();
+            if let Some(e) = &mal_json {
+                eprintln!("no pude leer la lista de planos — {e}");
+                return 2;
+            }
             if lista.is_empty() && media.is_empty() {
                 eprintln!("falta --media o --trabajos"); return 2;
             }

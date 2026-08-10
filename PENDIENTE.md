@@ -217,17 +217,24 @@ textura cada uno).
 
 | máquina | modelo | cómo | 34 s de sonido |
 |---|---|---|---|
-| M4 Max (Metal) | large-v3-turbo q5 | haz 5 | **1,6 s · 21,5× tiempo real** |
-| HX 370 (CPU) | small q5_1 | haz 2 · 16 hilos | 153,6 s · **0,2×** |
-| HX 370 (CPU) | small q5_1 | haz 2 · 12 hilos | 191,5 s · 0,2× |
+| M4 Max · **Metal** | large-v3-turbo q5 | haz 5 | 1,6 s · **21,5×** |
+| HX 370 · **Vulkan** (890M) | large-v3-turbo q5 | haz 5 | 14,7 s · **2,3×** |
+| HX 370 · CPU | small q5_1 | haz 2 · 16 hilos | 153,6 s · 0,2× |
+| HX 370 · CPU | small q5_1 | haz 2 · 12 hilos | 191,5 s · 0,2× |
 
-En el Mac vuela. **En el GPD el camino de CPU no da para material largo**:
-son cinco minutos de cuenta por cada minuto de bobina. No es por el build
-—ggml se compila allí con `/arch:AVX512` en Release, comprobado en el log de
-cmake— ni por los hilos: dejarle sólo los doce núcleos físicos salió PEOR
+**Vulkan sobre la Radeon 890M cambia el GPD de sitio**: doce veces más rápido
+que la CPU y encima con el modelo BUENO (turbo en vez de small) y el haz
+largo — 17 trozos donde la CPU sacaba 4. Por el camino de la bobina entera,
+con el modelo ya caliente, sube a 5,8× y 9,2×.
+
+El camino de CPU se queda como red de seguridad y no era culpa del build
+—ggml se compila con `/arch:AVX512` en Release, comprobado en el log de
+cmake— ni de los hilos: dejarle sólo los doce núcleos físicos salió PEOR
 (191 s) que los dieciséis lógicos (153), porque ese chip mezcla cuatro Zen 5
-con ocho Zen 5c y al planificador le va mejor tener dónde elegir. Es la
-potencia sostenida de un portátil de mano.
+con ocho Zen 5c y al planificador le va mejor tener dónde elegir.
+
+Y el español en el GPD, comprobado sobre el fichero: UTF-8 con sus tildes
+(«Todavía las cuidan», «Acuérdate de ponerlo»).
 
 **En el GPD, Vulkan sobre la Radeon 890M**, que es lo que convierte esa iGPU
 en el motor del oído igual que Metal en el Mac. Lo que costó montarlo ahí:
