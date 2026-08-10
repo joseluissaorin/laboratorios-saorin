@@ -84,13 +84,18 @@ bordes se pegan al ritmo solos. A lo que no tiene pulso se le dice que no lo
 tiene, no se le inventa.
 
 **El pie (subtítulos)** — pista propia debajo de la tira. Se transcriben
-solos con un modelo local, se corrigen escribiendo encima, se mueven y se
-estiran por los bordes, se parten por la aguja. El estilo es de toda la
-pista —letra, tinta, cuerpo, altura, sombra, caja, mayúsculas, caracteres por
-línea— y el de casa es clásico y moderno a la vez: Fraunces en hueso,
-centrado abajo, sin caja ni contorno duro, sólo un halo difuminado. Ocho
-lenguas a elegir. Para el motor un subtítulo **es una capa**, así que la
-preview y el máster enseñan exactamente lo mismo.
+solos con un modelo local desde **su propia ventana** (la lengua, qué trozo,
+de qué sonido, qué modelo, y una barra que dice por dónde va), se corrigen
+escribiendo encima, se mueven y se estiran por los bordes, se parten por la
+aguja. Salen **frase a frase** como debe ser —cortados por palabra, dos
+renglones, entre uno y siete segundos en pantalla— y no en párrafos.
+
+El estilo es de toda la pista: letra, **negrita**, *cursiva*, **color
+libre** (tres números, con seis atajos de la casa), cuerpo, altura, sombra,
+caja, mayúsculas y caracteres por línea. El de casa es clásico y moderno a la
+vez: Fraunces en hueso, centrado abajo, sin caja ni contorno duro, sólo un
+halo difuminado. Ocho lenguas a elegir. Para el motor un subtítulo **es una
+capa**, así que la preview y el máster enseñan exactamente lo mismo.
 
 **Cuarto oscuro** — 52 parámetros del look en galvanómetros de laboratorio,
 una lupa cuentahílos para mirar el grano al 100 %, comparador de cortinilla,
