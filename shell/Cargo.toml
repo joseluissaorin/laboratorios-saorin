@@ -8,9 +8,21 @@ description = "LABORATORIOS SAORÍN — estudio de vídeo con revelado fílmico"
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
+tauri = { version = "2", features = [], optional = true }
+tiny_http = "0.12"
+rust-embed = { version = "8", features = ["compression", "include-exclude"] }
+serde_json = "1"
+percent-encoding = "2"
 # EL OÍDO: whisper.cpp enlazado estático. En el Mac por Metal; en Windows por
 # CPU (el HX 370 es Zen 5 con AVX-512 y doce núcleos, y ggml los usa).
 whisper-rs = { version = "0.16", default-features = false, optional = true }
+
+# Metal SOLO en el Mac: en Windows ni existe, y pedirlo allí no compila.
+# OJO: aquí abajo sólo va lo que es DE ESTA PLATAFORMA. Lo común vive arriba —
+# poner una dependencia común en este bloque la hace desaparecer en Windows y
+# el taller se queda sin serde_json, sin tiny_http y sin nada (ya pasó).
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", default-features = false, features = ["metal"], optional = true }
 
 [features]
 # EL OÍDO se puede dejar fuera. whisper.cpp se enlaza con bindgen, que pide
@@ -25,15 +37,6 @@ oido = ["dep:whisper-rs"]
 # Windows tauri-build 2.6 no encuentra el `cargo:dev` de tauri y tumbaba el
 # taller ENTERO por una ventana que ya no abre nadie.
 ventana = ["dep:tauri", "dep:tauri-build"]
-
-# Metal SOLO en el Mac: en Windows ni existe, y pedirlo allí no compila
-[target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.16", default-features = false, features = ["metal"], optional = true }
-tauri = { version = "2", features = [], optional = true }
-tiny_http = "0.12"
-rust-embed = { version = "8", features = ["compression", "include-exclude"] }
-serde_json = "1"
-percent-encoding = "2"
 
 [profile.release]
 lto = true
