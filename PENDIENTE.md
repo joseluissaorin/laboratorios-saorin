@@ -229,9 +229,30 @@ cmake— ni por los hilos: dejarle sólo los doce núcleos físicos salió PEOR
 con ocho Zen 5c y al planificador le va mejor tener dónde elegir. Es la
 potencia sostenida de un portátil de mano.
 
-**Lo que falta para el GPD: el backend Vulkan sobre la Radeon 890M.** Es lo
-que convierte esa iGPU en el motor del oído, igual que Metal en el Mac. Pide
-el SDK de Vulkan instalado para compilar; no se ha hecho todavía.
+**En el GPD, Vulkan sobre la Radeon 890M**, que es lo que convierte esa iGPU
+en el motor del oído igual que Metal en el Mac. Lo que costó montarlo ahí:
+
+- el **SDK de Vulkan** (winget `KhronosGroup.VulkanSDK`), con `VULKAN_SDK` y
+  su `Bin` en el PATH — `glslc` compila los shaders de ggml;
+- **el entorno de MSVC cargado antes** (`vcvars64.bat`): el generador de
+  shaders de ggml-vulkan se compila con un cmake ANIDADO que no hereda lo que
+  preparan los crates `cc`/`cmake`, y sin vcvars su `cl.exe` «no puede
+  compilar un programa simple»;
+- y **Ninja como generador** (`CMAKE_GENERATOR=Ninja`): con el generador de
+  Visual Studio ese anidamiento se rompe igual aunque el entorno esté puesto.
+  Con Ninja no hay proyectos anidados que valga.
+
+Los tres están en `compilatodo.bat` del GPD.
+
+### El idioma del pie
+
+Se elige antes de escuchar y es **de la pista**: español, inglés, gallego,
+catalán, portugués, francés, italiano y «lo adivina». Está en la ficha del pie
+(con «escuchar otra vez» al lado, que es lo que se quiere después de
+cambiarlo) y en el menú Editar — porque antes de la primera transcripción no
+hay ningún subtítulo que elegir para llegar a su ficha. Comprobado que la
+bandera llega de verdad: el mismo audio español sale «Todavía las cuidan» en
+español y «They still take care of them» en inglés.
 
 ### Lo que costó llevarlo a Windows (para no repetirlo)
 
